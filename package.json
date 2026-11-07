@@ -1,27 +1,37 @@
 {
-  "name": "moodle-mcp-server",
-  "version": "0.1.0",
-  "description": "Moddle MCP server",
-  "private": true,
+  "name": "ufsc-moodle-mcp",
+  "version": "1.2.1",
+  "description": "MCP server para o Moodle da UFSC (presencial.moodle.ufsc.br) — gerenciamento de disciplinas, grupos e mod_groupselect, mensagens, fóruns, entregas individuais e em grupo, download binário preservado para OCR/renderização, extração de texto e avaliação",
+  "license": "MIT",
+  "author": "Jean Everson Martina",
   "type": "module",
   "bin": {
-    "moodle-mcp-server": "./build/index.js"
+    "ufsc-moodle-mcp": "dist/index.js"
   },
+  "main": "dist/index.js",
   "files": [
-    "build"
+    "dist",
+    "http-server.mjs"
   ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
-    "prepare": "npm run build",
-    "watch": "tsc --watch",
-    "inspector": "npx @modelcontextprotocol/inspector build/index.js"
+    "build": "tsc",
+    "test": "vitest run",
+    "start": "node dist/index.js",
+    "serve": "node http-server.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "0.6.0",
-    "axios": "^1.8.2"
+    "@modelcontextprotocol/server": "^2.0.0",
+    "fflate": "^0.8.3",
+    "unpdf": "^1.8.1",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
-    "@types/node": "^20.11.24",
-    "typescript": "^5.3.3"
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@types/node": "^26.4.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.0.0"
   }
 }
