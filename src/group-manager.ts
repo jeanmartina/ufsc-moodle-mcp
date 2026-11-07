@@ -202,7 +202,7 @@ export function generateUniqueGroupName(
  * /group/members.php, /group/assign.php, /course/modedit.php, /mod/groupselect/view.php)
  * when the external Web Service token (moodle_mobile_app) does not expose write functions.
  */
-class MoodleWebSession {
+export class MoodleWebSession {
   private readonly siteUrl: string;
   private readonly username?: string;
   private readonly password?: string;
@@ -394,6 +394,70 @@ class MoodleWebSession {
     }
     return res;
   }
+
+  public async uploadDraftFile(params: {
+    filename: string;
+    buffer: Uint8Array;
+    mimeType?: string;
+    token?: string;
+  }): Promise<{ draftItemId: number; filename: string }> {
+    const mime = params.mimeType || 'application/pdf';
+    // Method 1: Web Service upload endpoint if token is provided
+    if (params.token) {
+      const form = new FormData();
+      const blob = new Blob([Buffer.from(params.buffer)], { type: mime });
+      form.append('file', blob, params.filename);
+      const uploadUrl = `${this.siteUrl}/webservice/upload.php?token=${params.token}&itemid=0&filepath=/&filearea=draft`;
+      const res = await fetch(uploadUrl, { method: 'POST', body: form });
+      if (res.ok) {
+        const data = (await res.json().catch(() => null)) as any;
+        if (Array.isArray(data) && data[0]?.itemid) {
+          return {
+            draftItemId: Number(data[0].itemid),
+            filename: String(data[0].filename || params.filename),
+          };
+        }
+        if (data && (data.error || data.message)) {
+          throw new MoodleGroupError(
+            'moodle_api_error',
+            `Falha no upload para o Moodle via webservice: ${data.error || data.message}`
+          );
+        }
+      }
+    }
+
+    // Method 2: Web Session upload via repository_ajax.php
+    await this.ensureAuthenticated(false);
+    const form = new FormData();
+    const blob = new Blob([Buffer.from(params.buffer)], { type: mime });
+    form.append('repo_upload_file', blob, params.filename);
+    form.append('itemid', '0');
+    form.append('filepath', '/');
+    form.append('action', 'upload');
+    form.append('repo_id', '5');
+
+    const page = await this.requestPage('/my/');
+    const m =
+      page.html.match(/name=["']sesskey["'][^>]*value=["']([^"']+)["']/i) ||
+      page.html.match(/"sesskey":"([^"]+)"/i);
+    if (m?.[1]) form.append('sesskey', m[1]);
+
+    const upRes = await this.requestPage('/repository/repository_ajax.php?action=upload', {
+      method: 'POST',
+      body: form,
+    });
+    const parsed = JSON.parse(upRes.html) as any;
+    if (parsed.itemid) {
+      return {
+        draftItemId: Number(parsed.itemid),
+        filename: String(parsed.event || params.filename),
+      };
+    }
+    throw new MoodleGroupError(
+      'moodle_api_error',
+      `Falha no upload de arquivo para área de rascunho do Moodle: ${parsed.error || upRes.html.slice(0, 100)}`
+    );
+  }
 }
 
 function parseSelectedOption(
@@ -452,7 +516,7 @@ function parseMoodleDateTimeSelector(html: string, prefix: string): string | nul
   return `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:00`;
 }
 
-function extractMoodleFormErrors(html: string): string[] {
+export function extractMoodleFormErrors(html: string): string[] {
   const errs: string[] = [];
   for (const m of html.matchAll(
     /<(?:div|span)[^>]*(?:id=["']id_error_[^"']+["']|class=["'][^"']*(?:errormessage|invalid-feedback)[^"']*["'])[^>]*>([\s\S]*?)<\/(?:div|span)>/gi

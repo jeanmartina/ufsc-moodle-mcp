@@ -31,9 +31,13 @@ import {
   type NotificationPolicyOption,
   type PublicationStateOption,
 } from './grading-batch.js';
+import {
+  getOrCreateResourceManager,
+  MoodleResourceError,
+} from './resource-manager.js';
 import { withOperationMetrics } from './request-context.js';
 
-export const SERVER_VERSION = '1.2.1';
+export const SERVER_VERSION = '1.3.0';
 export const MCP_PROTOCOL_VERSION = '2025-03-26';
 
 export const REGISTERED_TOOL_NAMES = [
@@ -65,6 +69,8 @@ export const REGISTERED_TOOL_NAMES = [
   'add_group_member',
   'remove_group_member',
   'create_group_with_members',
+  'replace_course_resource_file',
+  'verify_course_resource_file',
 ] as const;
 
 function jsonResponse(data: unknown, isError = false): CallToolResult {
@@ -86,7 +92,11 @@ function errorResponse(error: unknown, client?: MoodleClient): CallToolResult {
       ? error.message
       : String(error);
 
-  if (error instanceof MoodleGroupError || error instanceof MoodleGradingError) {
+  if (
+    error instanceof MoodleGroupError ||
+    error instanceof MoodleGradingError ||
+    error instanceof MoodleResourceError
+  ) {
     return {
       content: [
         {
@@ -169,13 +179,14 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
   const client = sharedClient ?? new MoodleClient(config);
   const groupManager = getOrCreateGroupManager(client);
   const gradingBatchManager = getOrCreateGradingBatchManager(client);
+  const resourceManager = getOrCreateResourceManager(client, config);
 
   const server = new McpServer(
     {
       name: 'ufsc-moodle-mcp',
       title: 'UFSC Moodle MCP Server',
       description:
-        'Integração segura v1.2.1 para o Moodle da UFSC: resolução determinística de grupos de projeto vs turmas gerais, OCR local automático com layout visual estruturado (Tesseract + Poppler), download binário preservado, visão consolidada em lote de avaliações e fluxo auditado prepare_grading_batch -> commit_grading_batch -> verify_grading_batch.',
+        'Integração segura v1.3.0 para o Moodle da UFSC: resolução determinística de grupos de projeto vs turmas gerais, OCR local automático com layout visual estruturado (Tesseract + Poppler), download binário preservado, visão consolidada em lote de avaliações, fluxo auditado prepare/commit/verify e atualização atômica e verificada de arquivos PDF em recursos didáticos existentes (mod_resource) via replace_course_resource_file e verify_course_resource_file.',
       version: SERVER_VERSION,
     },
     {
@@ -184,10 +195,11 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
         resources: { listChanged: true },
       },
       instructions:
-        'Use get_moodle_capabilities para inspecionar ferramentas expostas, limites, OCR e capacidades do servidor v1.2.1. ' +
+        'Use get_moodle_capabilities para inspecionar ferramentas expostas, limites, OCR e capacidades do servidor v1.3.0. ' +
         'Para avaliar uma tarefa de turma inteira com mínima latência: (1) chame get_assignment_grading_overview(assignmentId) para obter resumo da tarefa, grupos efetivos (excluindo grupos gerais de turma), entregas, notas agregadas/individuais, comentários de feedback e cobertura; ' +
         '(2) use get_submission_content(assignmentId, groupId ou studentId, extractFiles=true, ocrMode="auto") ou read_moodle_file(..., ocrMode="auto") para ler tanto PDFs nativos quanto PDFs digitalizados/Canvas com coordenadas visuais sem precisar sair do MCP (ou download_moodle_file para obter o binário original); ' +
-        '(3) NUNCA altere notas/feedbacks sem revisão do professor: gere primeiro uma prévia estritamente de leitura com prepare_grading_batch, apresente ao professor, publique somente após confirmação explícita via commit_grading_batch (com planId, approvedPlanHash, confirmedByReviewer=true, operationId, publicationState e notificationPolicy) e valide em seguida com verify_grading_batch.',
+        '(3) NUNCA altere notas/feedbacks sem revisão do professor: gere primeiro uma prévia estritamente de leitura com prepare_grading_batch, apresente ao professor, publique somente após confirmação explícita via commit_grading_batch (com planId, approvedPlanHash, confirmedByReviewer=true, operationId, publicationState e notificationPolicy) e valide em seguida com verify_grading_batch. ' +
+        '(4) Para atualizar arquivos PDF de materiais didáticos (mod_resource) exportados pelo Google Drive MCP ou outra origem: utilize replace_course_resource_file (suporta dryRun, verificação de hash, preservação de cmid e URL pública) e verify_course_resource_file.',
     }
   );
 
@@ -2909,7 +2921,7 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
     {
       title: 'Consultar capacidades, versão, OCR, limites e ferramentas do UFSC Moodle MCP',
       description:
-        'Retorna metadados de versão e protocolo do servidor UFSC Moodle MCP (v1.2.1), a lista completa de 28 ferramentas registradas e disponíveis, funcionalidades ativas, status detalhado dos motores de OCR local (Poppler pdftoppm + Tesseract e idiomas instalados), limites operacionais, suporte a avaliação em lote controlada (prepare/commit/verify) e guia de atualização de cache de catálogo em clientes MCP externos.',
+        'Retorna metadados de versão e protocolo do servidor UFSC Moodle MCP (v1.3.0), a lista completa de 30 ferramentas registradas e disponíveis, funcionalidades ativas, status detalhado dos motores de OCR local (Poppler pdftoppm + Tesseract e idiomas instalados), limites operacionais, suporte a avaliação em lote controlada (prepare/commit/verify), suporte a atualização e verificação de arquivos PDF em recursos mod_resource (replace_course_resource_file / verify_course_resource_file) e guia de atualização de cache de catálogo em clientes MCP externos.',
       inputSchema: z.object({
         checkMoodleConnection: z
           .boolean()
@@ -2971,6 +2983,8 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
               postWriteVerification: true,
               submissionVsFeedbackCommentSeparation: true,
               courseGroupManagement: true,
+              resourcePdfReplacement: true,
+              resourceIntegrityVerification: true,
             },
             ocr: ocrCaps,
             limits: {
@@ -2995,6 +3009,20 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
               requiresHumanReviewerApproval: true,
               optimisticConcurrencyProtection: true,
               idempotentByOperationId: true,
+            },
+            resourceManagement: {
+              supported: true,
+              tools: [
+                'replace_course_resource_file',
+                'verify_course_resource_file',
+              ],
+              supportedSources: ['https_url', 'data_uri', 'base64', 'file_uri'],
+              supportsGoogleDrivePdfExport: true,
+              preservesCourseModuleId: true,
+              preservesPublicUrl: true,
+              dryRunSupported: true,
+              idempotencySupported: true,
+              pdfIntegrityValidation: true,
             },
             controlledPublication: {
               supportedPublicationStates: [
@@ -3381,6 +3409,146 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
           },
           verified.isError
         );
+      } catch (err) {
+        return errorResponse(err, client);
+      }
+    }
+  );
+
+  // 29. replace_course_resource_file
+  server.registerTool(
+    'replace_course_resource_file',
+    {
+      title: 'Atualizar ou substituir arquivo PDF em recurso didático existente (mod_resource)',
+      description:
+        'Substitui com segurança o arquivo PDF de um recurso mod_resource existente no Moodle (ex.: apresentação exportada pelo Google Drive MCP). Valida papel docente/edição no curso, valida a integridade do PDF (magic bytes, trailer %%EOF e ausência de senha), preserva intactos o courseModuleId e a URL pública do recurso, executa a atualização no Moodle via controller oficial (/course/modedit.php) e realiza verificação independente automática pós-gravação. Suporta dryRun=true para simulação prévia sem escrita.',
+      inputSchema: z.object({
+        courseId: z
+          .number()
+          .int()
+          .positive()
+          .describe('ID numérico da disciplina no Moodle (ex: 49476).'),
+        courseModuleId: z
+          .number()
+          .int()
+          .positive()
+          .describe(
+            'ID numérico do módulo do recurso no curso (cmid, ex: 1564872). O módulo deve ser do tipo mod_resource.'
+          ),
+        sourceFileUri: z
+          .string()
+          .optional()
+          .describe(
+            'URI ou URL de origem do arquivo PDF (ex.: URL de exportação do Google Drive, data URI data:application/pdf;base64,..., ou file://).'
+          ),
+        sourceBase64: z
+          .string()
+          .optional()
+          .describe('Conteúdo do arquivo PDF em Base64 bruto (alternativa a sourceFileUri).'),
+        sourceFileHeaders: z
+          .record(z.string(), z.string())
+          .optional()
+          .describe(
+            'Headers HTTP adicionais para download de sourceFileUri (ex: { "Authorization": "Bearer ..." }).'
+          ),
+        expectedCurrentFilename: z
+          .string()
+          .optional()
+          .describe(
+            'Nome esperado do arquivo atual no Moodle como trava de proteção anti-conflito/troca indevida (ex: "INE5458 -  DeFi and On Chain Finance.pdf").'
+          ),
+        newFilename: z
+          .string()
+          .optional()
+          .describe(
+            'Nome de arquivo desejado para o novo PDF no Moodle. Se omitido, preserva o nome atual do arquivo.'
+          ),
+        dryRun: z
+          .boolean()
+          .optional()
+          .describe(
+            'Se true, simula toda a operação (resolve origem, valida integridade do PDF, confere permissões e metadados no Moodle) sem aplicar qualquer modificação.'
+          ),
+        operationId: z
+          .string()
+          .optional()
+          .describe(
+            'Chave de idempotência para evitar uploads/modificações repetidas em retentativas com o mesmo operationId.'
+          ),
+      }),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (params) => {
+      try {
+        const { result, metrics } = await withOperationMetrics(async () =>
+          resourceManager.replaceCourseResourceFile(params)
+        );
+        return jsonResponse({
+          ...result,
+          metrics,
+        });
+      } catch (err) {
+        return errorResponse(err, client);
+      }
+    }
+  );
+
+  // 30. verify_course_resource_file
+  server.registerTool(
+    'verify_course_resource_file',
+    {
+      title: 'Verificar integridade e metadados de arquivo PDF em recurso didático (mod_resource)',
+      description:
+        'Reconsulta diretamente no Moodle o módulo mod_resource indicado, recupera seus metadados de arquivo, efetua download independente, valida se é um PDF íntegro (magic bytes, trailer %%EOF e ausência de criptografia com senha) e confere o hash SHA-256 e tamanho com os valores esperados fornecidos.',
+      inputSchema: z.object({
+        courseId: z
+          .number()
+          .int()
+          .positive()
+          .describe('ID numérico da disciplina no Moodle (ex: 49476).'),
+        courseModuleId: z
+          .number()
+          .int()
+          .positive()
+          .describe('ID numérico do módulo do recurso no curso (cmid, ex: 1564872).'),
+        expectedFilename: z
+          .string()
+          .optional()
+          .describe('Nome esperado do arquivo para conferência.'),
+        expectedSha256: z
+          .string()
+          .optional()
+          .describe(
+            'Hash SHA-256 esperado do arquivo PDF para conferência criptográfica exata.'
+          ),
+        expectedSizeBytes: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Tamanho exato esperado em bytes do arquivo PDF.'),
+      }),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (params) => {
+      try {
+        const { result, metrics } = await withOperationMetrics(async () =>
+          resourceManager.verifyCourseResourceFile(params)
+        );
+        return jsonResponse({
+          ...result,
+          metrics,
+        });
       } catch (err) {
         return errorResponse(err, client);
       }

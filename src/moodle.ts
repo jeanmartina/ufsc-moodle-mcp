@@ -44,6 +44,7 @@ export interface MoodleConfig {
   auditLogPath?: string;
   gradingAuditLogPath?: string;
   gradingStateDir?: string;
+  resourceAuditLogPath?: string;
   ocrEnabled?: boolean;
   ocrMaxPages?: number;
   ocrDpi?: number;
@@ -610,6 +611,7 @@ export function loadMoodleConfig(): MoodleConfig {
     auditLogPath: process.env.MOODLE_AUDIT_LOG_PATH?.trim() || undefined,
     gradingAuditLogPath: process.env.MOODLE_GRADING_AUDIT_LOG_PATH?.trim() || undefined,
     gradingStateDir: process.env.MOODLE_GRADING_STATE_DIR?.trim() || undefined,
+    resourceAuditLogPath: process.env.MOODLE_RESOURCE_AUDIT_LOG_PATH?.trim() || undefined,
     ocrEnabled,
     ocrMaxPages,
     ocrDpi,
@@ -668,6 +670,9 @@ export class MoodleClient {
 
   constructor(config?: MoodleConfig, sharedFileStore?: TempFileStore) {
     this.config = config ?? loadMoodleConfig();
+    if (!this.config.restEndpoint && this.config.siteUrl) {
+      this.config.restEndpoint = `${this.config.siteUrl}/webservice/rest/server.php`;
+    }
     this.fileStore =
       sharedFileStore ??
       new TempFileStore({

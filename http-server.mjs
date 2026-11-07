@@ -1,5 +1,6 @@
 import { createMoodleHttpServer } from "./dist/http-app.js";
 import { loadMoodleConfig, redactSecrets } from "./dist/moodle.js";
+import { SERVER_VERSION } from "./dist/server.js";
 
 const config = loadMoodleConfig();
 const secrets = [config.token, config.password, process.env.MCP_AUTH_TOKEN];
@@ -20,7 +21,7 @@ const HOST = process.env.HOST || "0.0.0.0";
 const app = createMoodleHttpServer({ config });
 
 app.httpServer.listen(PORT, HOST, () => {
-  console.log(`UFSC Moodle MCP HTTP Server v1.2.1 listening on ${HOST}:${PORT}`);
+  console.log(`UFSC Moodle MCP HTTP Server v${SERVER_VERSION} listening on ${HOST}:${PORT}`);
   if (process.env.MCP_AUTH_TOKEN) {
     console.log("Bearer / path-token authentication enabled for MCP endpoints");
   }

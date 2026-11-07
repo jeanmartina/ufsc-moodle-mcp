@@ -1074,11 +1074,11 @@ describe('UFSC Moodle MCP v1.2.0 — Grupos Definitivos, Avaliações em Lote, P
     fs.rmSync(tempRootDir, { recursive: true, force: true });
   });
 
-  it('1. Descoberta externa MCP, portabilidade de JSON Schema (sem format="uri") e get_moodle_capabilities v1.2.0', async () => {
+  it('1. Descoberta externa MCP, portabilidade de JSON Schema (sem format="uri") e get_moodle_capabilities v1.3.0', async () => {
     const toolsList = await mcpClient.listTools();
     const names = toolsList.tools.map((t) => t.name);
 
-    expect(names.length).toBe(28);
+    expect(names.length).toBe(30);
     expect(names).toContain('download_moodle_file');
     expect(names).toContain('read_moodle_file');
     expect(names).toContain('get_moodle_capabilities');
@@ -1086,6 +1086,8 @@ describe('UFSC Moodle MCP v1.2.0 — Grupos Definitivos, Avaliações em Lote, P
     expect(names).toContain('prepare_grading_batch');
     expect(names).toContain('commit_grading_batch');
     expect(names).toContain('verify_grading_batch');
+    expect(names).toContain('replace_course_resource_file');
+    expect(names).toContain('verify_course_resource_file');
 
     // Verify ChatGPT / OpenAI MCP connector compatibility: NO schema uses format: "uri"
     for (const tool of toolsList.tools) {
@@ -1106,8 +1108,8 @@ describe('UFSC Moodle MCP v1.2.0 — Grupos Definitivos, Avaliações em Lote, P
     expect(capRes.isError).toBeFalsy();
     const caps = parseToolJson(capRes);
 
-    expect(caps.serverVersion).toBe('1.2.1');
-    expect(caps.availableToolsCount).toBe(28);
+    expect(caps.serverVersion).toBe('1.3.0');
+    expect(caps.availableToolsCount).toBe(30);
     expect(caps.moodleSite.connected).toBe(true);
     expect(caps.moodleSite.release).toContain('4.1.5+');
     expect(caps.ocr.available).toBe(true);
@@ -1116,6 +1118,8 @@ describe('UFSC Moodle MCP v1.2.0 — Grupos Definitivos, Avaliações em Lote, P
     expect(caps.batchOperations.supported).toBe(true);
     expect(caps.batchOperations.prepareIsStrictlyReadOnly).toBe(true);
     expect(caps.controlledPublication.blocksSilentReleaseWhenWorkflowDisabled).toBe(true);
+    expect(caps.resourceManagement.supported).toBe(true);
+    expect(caps.resourceManagement.supportsGoogleDrivePdfExport).toBe(true);
   });
 
   it('2. Resolução definitiva de grupos: separa turma geral (62318 com professor) de grupos do projeto (67199, 68884, 67336), ambiguidade multi-grupo e alunos sem grupo', async () => {

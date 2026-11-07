@@ -1,4 +1,4 @@
-# UFSC Moodle MCP Server (`ufsc-moodle-mcp` v1.2.1)
+# UFSC Moodle MCP Server (`ufsc-moodle-mcp` v1.3.0)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
@@ -6,6 +6,21 @@
 [![MCP](https://img.shields.io/badge/MCP-2.0-orange.svg)](https://modelcontextprotocol.io/)
 
 Servidor **Model Context Protocol (MCP)** em TypeScript desenvolvido para o **Moodle da UFSC** (`https://presencial.moodle.ufsc.br`), com suporte a **Streamable HTTP** (para integração direta com **ChatGPT**, **Codex**, **Claude**, **Orca/Antigravity** e agentes autônomos) e **Stdio**.
+
+## Novidades da Versão 1.3.0
+
+1. **Atualização Atômica e Verificada de Recursos Didáticos em PDF (`mod_resource`):**
+   - **Integração sem Navegador com Google Drive MCP:** Permite ao ChatGPT ou agente de IA exportar uma apresentação do Google Drive para `application/pdf` e substituir diretamente o arquivo em um recurso de disciplina no Moodle (`mod_resource`), sem qualquer necessidade de automação de navegador (Playwright/Puppeteer).
+   - **Preservação Rígida da Identidade do Módulo:** O `courseModuleId` (`cmid`), a URL pública de acesso (`https://presencial.moodle.ufsc.br/mod/resource/view.php?id=...`), a seção e as configurações de visibilidade do recurso são rigorosamente preservadas.
+   - **Estratégia Híbrida de Upload e Atualização:** Utiliza a rota oficial `/webservice/upload.php` para envio seguro à área de rascunhos (`draftfile`) associada ao token e atualiza o recurso via controlador nativo `/course/modedit.php`, invalidando caches e registrando o histórico.
+   - **Validação Estrutural e Criptográfica de PDFs:** Valida assinatura de bytes mágica (`%PDF-`), marcador de término (`%%EOF`), parse sintático e contagem de páginas via `unpdf`, ausência de criptografia/senha e calcula o hash SHA-256 canônico.
+   - **Trava de Proteção contra Troca Incorreta (`expectedCurrentFilename`):** Parâmetro de salvaguarda que impede a substituição se o nome do arquivo atual no Moodle divergir do esperado pelo usuário.
+   - **Simulação com `dryRun: true`:** Executa todas as validações de autorização, integridade do PDF e inspeção do recurso sem realizar nenhuma gravação no Moodle.
+   - **Garantia de Idempotência:** Chave `operationId` para prevenir gravações repetidas em retentativas de rede.
+   - **Ferramenta Independente `verify_course_resource_file`:** Baixa o arquivo do Moodle de forma isolada, confere integridade do PDF e valida o hash SHA-256 e tamanho com os valores esperados.
+   - **Trilha de Auditoria Auditável:** Log persistente em `/config/resource-audit.jsonl` com timestamp, actor, cmid, hashes antes/depois e confirmação de integridade.
+
+---
 
 ## Novidades da Versão 1.2.1
 
@@ -66,11 +81,11 @@ Servidor **Model Context Protocol (MCP)** em TypeScript desenvolvido para o **Mo
 
 ---
 
-## Catálogo Completo de Ferramentas (28 Tools)
+## Catálogo Completo de Ferramentas (30 Tools)
 
 | # | Ferramenta | Descrição |
 | :- | :--- | :--- |
-| 1 | `get_moodle_capabilities` | Metadados do servidor, versão (v1.2.1), suporte a OCR, limites, capacidades e guia de refresh. |
+| 1 | `get_moodle_capabilities` | Metadados do servidor, versão (v1.3.0), suporte a OCR, limites, capacidades e guia de refresh. |
 | 2 | `get_site_info` | Dados do usuário autenticado no Moodle (`userid`, nome, `siteurl`, release). |
 | 3 | `get_courses` | Lista disciplinas acessíveis com filtro por código/semestre (ex.: `"INE5458"`, `"20262"`). |
 | 4 | `get_course_contents` | Lista seções, tópicos, arquivos (PDFs, slides) e módulos da disciplina. |
@@ -98,6 +113,8 @@ Servidor **Model Context Protocol (MCP)** em TypeScript desenvolvido para o **Mo
 | 26 | `add_group_member` | Adiciona participante(s) a um grupo com validação de matrícula e capacidade. |
 | 27 | `remove_group_member` | Remove participante(s) de um grupo de forma idempotente e auditada. |
 | 28 | `create_group_with_members` | Operação composta para criar grupo e matricular alunos em uma única chamada. |
+| 29 | `replace_course_resource_file` | Substitui com segurança e validação atômica o PDF de um recurso `mod_resource` existente (ex.: exportado pelo Google Drive MCP). Preserva cmid e URL pública, suporta `dryRun`, verificação e idempotência. |
+| 30 | `verify_course_resource_file` | Reconsulta ao vivo o Moodle, efetua download independente, valida integridade do PDF e confere tamanho e hash SHA-256 com os esperados. |
 
 ---
 
@@ -244,12 +261,52 @@ docker run -d \
 
 ---
 
+## Atualização de PDFs em Recursos Didáticos (`mod_resource`) via Google Drive MCP
+
+Para substituir arquivos de aula (slides, apostilas, ementas) no Moodle sem automação de navegador:
+
+```mermaid
+flowchart LR
+    A["1. Google Drive MCP<br/>(export_file -> PDF URI)"] --> B["2. Simulação Moodle MCP<br/>(replace_course_resource_file com dryRun=true)"]
+    B --> C["3. Substituição Atômica<br/>(replace_course_resource_file com dryRun=false)"]
+    C --> D["4. Verificação Independente<br/>(verify_course_resource_file)"]
+```
+
+### Exemplo de Chamada via ChatGPT / Agente:
+
+```json
+{
+  "name": "replace_course_resource_file",
+  "arguments": {
+    "courseId": 49476,
+    "courseModuleId": 1564872,
+    "expectedCurrentFilename": "INE5458 -  DeFi and On Chain Finance.pdf",
+    "sourceFileUri": "https://docs.google.com/presentation/d/12ETsNXe2fZLpThBLwy0EucWfC8rjtccnNwQsFWfeCaA/export/pdf",
+    "dryRun": false,
+    "operationId": "replace-defi-slides-20261107"
+  }
+}
+```
+
+O Moodle MCP realiza:
+1. Validação do papel docente de edição do usuário no curso (`checkCourseEditingPermission`).
+2. Validação se o módulo existe e é do tipo `mod_resource`.
+3. Validação do arquivo atual contra a trava de segurança `expectedCurrentFilename`.
+4. Resolução da origem (Google Drive HTTPS export, Data URI, Base64 ou arquivo local).
+5. Validação estrutural do PDF (magic bytes `%PDF-`, finalizador `%%EOF`, integridade e contagem de páginas com `unpdf`, conferência de ausência de senha/criptografia).
+6. Upload do novo arquivo para a área de rascunho (`draftfile`) do Moodle.
+7. Atualização atômica do módulo via `/course/modedit.php`, preservando intactos o `courseModuleId` e o link público de acesso.
+8. Reconsulta e conferência em tempo real dos metadados e hash SHA-256 no Moodle.
+9. Registro da operação na trilha de auditoria `/config/resource-audit.jsonl`.
+
+---
+
 ## Como Atualizar o Catálogo em Clientes MCP (ChatGPT Connectors)
 
 Clientes como o ChatGPT mantêm cache local das ferramentas descobertas via `tools/list`:
 1. Acesse **Configurações -> Conectores / Apps -> UFSC Moodle MCP**.
 2. Clique em **Atualizar ferramentas** (*Refresh tools*) ou reconecte o conector.
-3. Inicie uma **nova conversa** para que o assistente consulte o catálogo v1.2.1 atualizado.
+3. Inicie uma **nova conversa** para que o assistente consulte o catálogo v1.3.0 atualizado.
 
 ---
 
