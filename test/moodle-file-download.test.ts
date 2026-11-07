@@ -237,10 +237,10 @@ describe('UFSC Moodle MCP v1.1.0 — Download Original, OCR/Renderização, Grup
           res.end(
             JSON.stringify({
               sitename: 'Moodle UFSC Teste',
-              username: 'jean.martina',
-              firstname: 'Jean',
-              lastname: 'Martina',
-              fullname: 'Jean Everson Martina',
+              username: 'professor.exemplo',
+              firstname: 'Professor',
+              lastname: 'Exemplo',
+              fullname: 'Prof. Exemplo Moodle',
               userid: 999,
               siteurl: mockMoodleBaseUrl,
               release: '4.5',

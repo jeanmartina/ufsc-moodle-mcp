@@ -88,9 +88,9 @@ class StatefulMockMoodleServer {
     // Actor 9001: Professor with editingteacher / moodle/course:managegroups
     this.users.set(9001, {
       id: 9001,
-      username: 'jean.martina',
-      fullname: 'Jean Everson Martina',
-      email: 'jean.martina@ufsc.br',
+      username: 'professor.exemplo',
+      fullname: 'Prof. Exemplo Moodle',
+      email: 'professor.exemplo@ufsc.br',
       roles: ['editingteacher'],
     });
 
@@ -98,9 +98,9 @@ class StatefulMockMoodleServer {
     const seedStudents: MockUser[] = [
       {
         id: 38610,
-        username: '21204555',
-        fullname: 'Pedro Philippi Araujo (21204555)',
-        email: 'pedro@syncnow.net',
+        username: '21200000',
+        fullname: 'Pedro Aluno Exemplo (21200000)',
+        email: 'pedro.exemplo@grad.ufsc.br',
         roles: ['student'],
       },
       {
@@ -257,7 +257,7 @@ class StatefulMockMoodleServer {
 
         const u = postParams.get('username');
         const p = postParams.get('password');
-        if (u === 'jean.martina' && p === SECRET_MOODLE_PASSWORD) {
+        if (u === 'professor.exemplo' && p === SECRET_MOODLE_PASSWORD) {
           const sid = `SID_${Date.now()}_${Math.random().toString(36).slice(2)}`;
           this.validSessions.add(sid);
           res.writeHead(303, {
@@ -841,7 +841,7 @@ describe('UFSC Moodle MCP Group Management & mod_groupselect Suite', () => {
       siteUrl: mockMoodle.baseUrl,
       restEndpoint: `${mockMoodle.baseUrl}/webservice/rest/server.php`,
       token: SECRET_MOODLE_TOKEN,
-      username: 'jean.martina',
+      username: 'professor.exemplo',
       password: SECRET_MOODLE_PASSWORD,
       tempDir,
       fileTtlSeconds: 600,
@@ -976,7 +976,7 @@ describe('UFSC Moodle MCP Group Management & mod_groupselect Suite', () => {
     expect(membersCheck.isError).toBe(false);
     expect(membersCheck.body.memberCount).toBe(1);
     expect(membersCheck.body.availableInActivity).toBe(true);
-    expect(membersCheck.body.members[0].fullname).toContain('Pedro Philippi Araujo');
+    expect(membersCheck.body.members[0].fullname).toContain('Pedro Aluno Exemplo');
 
     // Remove and re-remove idempotently
     const rem1 = await callJsonTool(mcpClient, 'remove_group_member', {

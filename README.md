@@ -1,5 +1,10 @@
 # UFSC Moodle MCP Server (`ufsc-moodle-mcp` v1.2.1)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
+[![MCP](https://img.shields.io/badge/MCP-2.0-orange.svg)](https://modelcontextprotocol.io/)
+
 Servidor **Model Context Protocol (MCP)** em TypeScript desenvolvido para o **Moodle da UFSC** (`https://presencial.moodle.ufsc.br`), com suporte a **Streamable HTTP** (para integração direta com **ChatGPT**, **Codex**, **Claude**, **Orca/Antigravity** e agentes autônomos) e **Stdio**.
 
 ## Novidades da Versão 1.2.1
@@ -132,6 +137,113 @@ flowchart TD
 
 ---
 
+## Instalação e Execução
+
+### Pré-requisitos
+- **Node.js**: Versão 22.x ou superior
+- **Poppler & Tesseract** (opcionais, necessários apenas para OCR local de PDFs escaneados):
+  - Ubuntu/Debian: `sudo apt-get install poppler-utils tesseract-ocr tesseract-ocr-por tesseract-ocr-eng`
+  - macOS: `brew install poppler tesseract tesseract-lang`
+
+### 1. Execução Local via Stdio (Claude Desktop / Cursor)
+
+```bash
+# Clonar o repositório
+git clone https://github.com/jeanmartina/ufsc-moodle-mcp.git
+cd ufsc-moodle-mcp
+
+# Instalar dependências e compilar
+npm install
+npm run build
+
+# Executar via Stdio
+node dist/index.js
+```
+
+### 2. Execução como Servidor Streamable HTTP / SSE (ChatGPT / Webhooks / Agentes)
+
+```bash
+# Definir variáveis de ambiente no arquivo .env
+cp .env.example .env
+
+# Iniciar o servidor HTTP na porta 8088
+npm run serve
+```
+
+---
+
+## Guia de Configuração com Clientes MCP
+
+### Claude Desktop
+
+Adicione ao seu `claude_desktop_config.json` (no macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`; no Linux/Windows: `~/.config/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "moodle-ufsc": {
+      "command": "node",
+      "args": ["/caminho/absoluto/para/ufsc-moodle-mcp/dist/index.js"],
+      "env": {
+        "MOODLE_URL": "https://presencial.moodle.ufsc.br",
+        "MOODLE_API_TOKEN": "seu_token_webservice_moodle",
+        "MOODLE_USERNAME": "seu.usuario",
+        "MOODLE_PASSWORD": "sua_senha"
+      }
+    }
+  }
+}
+```
+
+### Cursor (`.cursor/mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "moodle-ufsc": {
+      "command": "node",
+      "args": ["/caminho/absoluto/para/ufsc-moodle-mcp/dist/index.js"],
+      "env": {
+        "MOODLE_URL": "https://presencial.moodle.ufsc.br",
+        "MOODLE_API_TOKEN": "seu_token_webservice_moodle"
+      }
+    }
+  }
+}
+```
+
+### ChatGPT (Streamable HTTP Conector)
+
+1. Inicie o servidor HTTP com uma chave secreta:
+   ```bash
+   PORT=8088 MCP_AUTH_TOKEN=seu_token_bearer node http-server.mjs
+   ```
+2. No ChatGPT, configure uma Custom Action ou MCP Connector apontando para o endpoint HTTPS do seu proxy (ou tunnel):
+   - **URL:** `https://seu-servidor.dominio.br/mcp/moodle`
+   - **Authentication:** Bearer Token (`seu_token_bearer`)
+
+---
+
+## Execução via Docker
+
+O repositório já inclui um `Dockerfile` multi-stage otimizado baseado em Alpine Linux com Poppler e Tesseract pré-instalados:
+
+```bash
+# Construir a imagem Docker
+docker build -t ufsc-moodle-mcp:latest .
+
+# Executar o container HTTP
+docker run -d \
+  --name ufsc-moodle-mcp \
+  -p 8088:8088 \
+  -e MOODLE_URL=https://presencial.moodle.ufsc.br \
+  -e MOODLE_API_TOKEN=seu_token \
+  -e MCP_AUTH_TOKEN=seu_bearer_token \
+  ufsc-moodle-mcp:latest
+```
+
+---
+
 ## Como Atualizar o Catálogo em Clientes MCP (ChatGPT Connectors)
 
 Clientes como o ChatGPT mantêm cache local das ferramentas descobertas via `tools/list`:
@@ -141,12 +253,16 @@ Clientes como o ChatGPT mantêm cache local das ferramentas descobertas via `too
 
 ---
 
-## Procedimento de Rollback para a v1.2.0 ou v1.1.0
+## 🧪 Testes Automatizados
 
-Caso seja necessário reverter a implantação:
+O repositório conta com suíte abrangente de testes unitários e de integração utilizando [Vitest](https://vitest.dev/):
+
 ```bash
-# No host de produção (n8n.labsec.ufsc.br):
-cd /home/labsec/mcp-services
-sudo cp -r moodle/code.bak-v1.2.0/* moodle/code/
-sudo docker restart mcp-ufsc-moodle-server
+npm test
 ```
+
+---
+
+## 📄 Licença
+
+Distribuído sob a licença **MIT**. Consulte o arquivo [LICENSE](LICENSE) para mais informações.

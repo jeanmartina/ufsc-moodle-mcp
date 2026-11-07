@@ -381,8 +381,8 @@ describe('UFSC Moodle MCP v1.2.0 — Grupos Definitivos, Avaliações em Lote, P
       // Teacher enrolled in general class group 62318! Must NEVER appear in assignmentGroupMembers!
       {
         id: 999,
-        fullname: 'Prof. Jean Martina',
-        email: 'jean.martina@ufsc.br',
+        fullname: 'Prof. Exemplo Moodle',
+        email: 'professor.exemplo@ufsc.br',
         roles: [{ shortname: 'editingteacher' }],
         groups: [{ id: 62318, name: 'INE5458-08208 (20262)' }],
       },
@@ -480,10 +480,10 @@ describe('UFSC Moodle MCP v1.2.0 — Grupos Definitivos, Avaliações em Lote, P
           res.end(
             JSON.stringify({
               sitename: 'Moodle UFSC Presencial',
-              username: 'jean.martina',
-              firstname: 'Jean',
-              lastname: 'Martina',
-              fullname: 'Prof. Jean Martina',
+              username: 'professor.exemplo',
+              firstname: 'Professor',
+              lastname: 'Exemplo',
+              fullname: 'Prof. Exemplo Moodle',
               userid: 999,
               siteurl: mockMoodleBaseUrl,
               release: '4.1.5+ (Build: 20230920)',
