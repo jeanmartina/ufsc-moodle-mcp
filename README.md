@@ -1,4 +1,4 @@
-# UFSC Moodle MCP Server (`ufsc-moodle-mcp` v1.3.0)
+# UFSC Moodle MCP Server (`ufsc-moodle-mcp` v1.4.0)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
@@ -6,6 +6,23 @@
 [![MCP](https://img.shields.io/badge/MCP-2.0-orange.svg)](https://modelcontextprotocol.io/)
 
 Servidor **Model Context Protocol (MCP)** em TypeScript desenvolvido para o **Moodle da UFSC** (`https://presencial.moodle.ufsc.br`), com suporte a **Streamable HTTP** (para integração direta com **ChatGPT**, **Codex**, **Claude**, **Orca/Antigravity** e agentes autônomos) e **Stdio**.
+
+## Novidades da Versão 1.4.0
+
+1. **Gestão, Edição e Publicação Segura de Tarefas (`mod_assign`):**
+   - **Leitura Completa e Inequívoca (`get_assignment_details`):** Inspeciona todos os metadados de uma tarefa sem ambiguidade. Distingue explicitamente o estado do enunciado (`present`, `empty`, `not_returned` ou `unauthorized`), impedindo que indisponibilidade temporária seja tratada falsamente como enunciado vazio.
+   - **Semântica Rigorosa de Fuso Horário e Prazos Independentes:** Trata datas com offset explícito ou fuso IANA (`America/Sao_Paulo` por padrão), calculando e expondo a representação local e o equivalente UTC. Cruza meias-noites UTC de forma determinística (ex.: `2026-11-26T23:59:00-03:00` corresponde a `2026-11-27T02:59:00Z`).
+   - **Independência Estrita entre Vencimento e Encerramento:** Alterar a data de vencimento (`dueDate`) **nunca altera o encerramento (`cutoffDate`)**. Preserva janelas de tolerância e políticas de atraso da disciplina sem criar regras arbitrárias.
+   - **Verificação Conjunta de Visibilidade e Impedimentos:** Avalia a visibilidade do módulo combinada com a visibilidade da seção (`sectionVisible`) e restrições de disponibilidade (`availabilityInfo`). Se o módulo estiver visível mas a seção oculta, a visibilidade efetiva (`effectiveVisible`) é declarada falsa com aviso explícito de impedimento.
+   - **Configuração de Arquivos de Entrega (PDF + ZIP) e Proteção:** Suporta configuração de tipos de arquivos aceitos (`.pdf,.zip`), quantidade máxima de arquivos e limites de bytes. Proíbe a redução não autorizada da quantidade máxima de arquivos já existente a menos que seja aprovada com a flag explícita `allowReduceMaxFiles: true`.
+   - **Fluxo Auditado em Duas Etapas (Prepare -> Commit):**
+     - `prepare_assignment_update`: Operação **estritamente somente-leitura**. Recebe um patch parcial (campos omitidos são integralmente preservados), gera diff legível, valida bloqueios, calcula o fingerprint de estado anterior e emite um `planId` e um hash de aprovação HMAC-SHA256 (`planHash`) válido por 1 hora.
+     - `commit_assignment_update`: Aplica o conjunto exato de alterações no Moodle via controlador oficial `/course/modedit.php` (sem navegador ou emulação frágil). Exige confirmação humana explícita (`confirmedByReviewer: true`) e hash válido.
+   - **Proteção Contra Concorrência Otimista e Idempotência:** Compara o `stateFingerprint` atual com o fingerprint capturado no plano para impedir sobrescrita de modificações concorrentes feitas pelo professor. Suporta repetição idempotente via `operationId`.
+   - **Verificação Independente Pós-Gravação (`verify_assignment_update`):** Reler diretamente o Moodle sem confiar na resposta de escrita, conferindo todos os campos alterados e confirmando a integridade dos campos preservados (nome, modalidade individual/grupo, nota máxima e workflow).
+   - **Trilha de Auditoria Auditável:** Log persistente em `/config/assignment-audit.jsonl` com timestamp, actor, cmid, diff aplicado, verificação e redação automática de credenciais.
+
+---
 
 ## Novidades da Versão 1.3.0
 
@@ -81,11 +98,11 @@ Servidor **Model Context Protocol (MCP)** em TypeScript desenvolvido para o **Mo
 
 ---
 
-## Catálogo Completo de Ferramentas (30 Tools)
+## Catálogo Completo de Ferramentas (34 Tools)
 
 | # | Ferramenta | Descrição |
 | :- | :--- | :--- |
-| 1 | `get_moodle_capabilities` | Metadados do servidor, versão (v1.3.0), suporte a OCR, limites, capacidades e guia de refresh. |
+| 1 | `get_moodle_capabilities` | Metadados do servidor, versão (v1.4.0), suporte a OCR, limites, capacidades e guia de refresh. |
 | 2 | `get_site_info` | Dados do usuário autenticado no Moodle (`userid`, nome, `siteurl`, release). |
 | 3 | `get_courses` | Lista disciplinas acessíveis com filtro por código/semestre (ex.: `"INE5458"`, `"20262"`). |
 | 4 | `get_course_contents` | Lista seções, tópicos, arquivos (PDFs, slides) e módulos da disciplina. |
@@ -115,6 +132,67 @@ Servidor **Model Context Protocol (MCP)** em TypeScript desenvolvido para o **Mo
 | 28 | `create_group_with_members` | Operação composta para criar grupo e matricular alunos em uma única chamada. |
 | 29 | `replace_course_resource_file` | Substitui com segurança e validação atômica o PDF de um recurso `mod_resource` existente (ex.: exportado pelo Google Drive MCP). Preserva cmid e URL pública, suporta `dryRun`, verificação e idempotência. |
 | 30 | `verify_course_resource_file` | Reconsulta ao vivo o Moodle, efetua download independente, valida integridade do PDF e confere tamanho e hash SHA-256 com os esperados. |
+| 31 | `get_assignment_details` | Leitura completa de tarefa (`mod_assign`): status explícito do enunciado (`present`, `empty`, `not_returned`, `unauthorized`), datas com timezone, visibilidade efetiva (módulo + seção), arquivos aceitos e fingerprint. |
+| 32 | `prepare_assignment_update` | **Somente-leitura.** Prepara plano de alteração de tarefa com diff legível, validação de datas independentes (`dueDate` vs `cutoffDate`), tipos de arquivo (`.pdf,.zip`) e hash HMAC-SHA256 para aprovação. |
+| 33 | `commit_assignment_update` | Aplica o plano aprovado no Moodle via controlador oficial (`/course/modedit.php`) com confirmação humana obrigatória (`confirmedByReviewer: true`), controle de concorrência e idempotência. |
+| 34 | `verify_assignment_update` | Releitura direta do Moodle pós-gravação, conferindo os campos alterados e assegurando a preservação de campos intocados (nome, modalidade individual/grupo, nota máxima e anexos). |
+
+---
+
+## Gestão, Edição e Publicação Segura de Tarefas (`mod_assign`)
+
+O fluxo em duas etapas (Prepare -> Commit -> Verify) garante que nenhuma alteração em enunciado, datas ou configurações seja submetida ao Moodle sem validação prévia e aprovação explícita do docente:
+
+```mermaid
+flowchart TD
+    A["1. Leitura Completa dos Detalhes<br/>(get_assignment_details)"] --> B["2. Preparação do Plano e Diff (SOMENTE-LEITURA)<br/>(prepare_assignment_update)"]
+    B --> C["3. Revisão do Diff e Aprovação Humana<br/>(Exibição do diff, verificação de prazos e hash)"]
+    C --> D["4. Gravação Autorizada e Atômica<br/>(commit_assignment_update com confirmedByReviewer=true)"]
+    D --> E["5. Verificação Independente ao Vivo no Moodle<br/>(verify_assignment_update)"]
+```
+
+### Exemplo de Uso: Inserção de Enunciado e Configuração de Prazos / PDF+ZIP
+
+#### 1. Consulta Inicial dos Detalhes da Tarefa
+```json
+{
+  "courseId": 49472,
+  "assignmentId": 125468
+}
+```
+Retorna metadados completos, status do enunciado (ex.: `"empty"` ou `"not_returned"`), datas convertidas para `America/Sao_Paulo` e UTC, visibilidade do módulo e da seção, e `stateFingerprint`.
+
+#### 2. Preparação do Plano de Alteração (Sem Escrita no Moodle)
+```json
+{
+  "courseId": 49472,
+  "assignmentId": 125468,
+  "patch": {
+    "intro": "<h3>Trabalho Prático Individual — Implementação e Análise Crítica de Pipeline DevSecOps</h3><p>Orientações da atividade...</p>",
+    "visible": true,
+    "alwaysShowDescription": true,
+    "dueDate": {
+      "enabled": true,
+      "date": "2026-11-26T23:59:00-03:00"
+    },
+    "fileSubmissionEnabled": true,
+    "fileTypes": ".pdf,.zip",
+    "maxFiles": 2
+  }
+}
+```
+Retorna `planId`, `planHash`, `proposedDiff` detalhado e a confirmação de que `cutoffDate`, `name`, `maxGrade` e `teamSubmission` permanecem intactos.
+
+#### 3. Aplicação do Plano Aprovado
+```json
+{
+  "planId": "plan_assign_1795748340000_a1b2c3d4e5f6",
+  "planHash": "3f98c4b2...",
+  "confirmedByReviewer": true,
+  "operationId": "publish_devsecops_2026_01"
+}
+```
+Aplica a alteração de forma segura via `/course/modedit.php` e executa a verificação pós-gravação automática.
 
 ---
 
@@ -151,6 +229,8 @@ flowchart TD
 | `MOODLE_OCR_MAX_CONCURRENCY` | `2` | Limite de processos de OCR concorrentes. |
 | `MOODLE_GRADING_AUDIT_LOG_PATH` | `/config/grading-audit.jsonl` | Caminho do log JSONL de auditoria de avaliações. |
 | `MOODLE_GRADING_STATE_DIR` | `/config/grading-state` | Diretório para persistência de operações em lote. |
+| `ASSIGNMENT_AUDIT_LOG_PATH` | `/config/assignment-audit.jsonl` | Caminho do log JSONL de auditoria de alterações de tarefas (`mod_assign`). |
+| `RESOURCE_AUDIT_LOG_PATH` | `/config/resource-audit.jsonl` | Caminho do log JSONL de auditoria de substituição de recursos (`mod_resource`). |
 
 ---
 
