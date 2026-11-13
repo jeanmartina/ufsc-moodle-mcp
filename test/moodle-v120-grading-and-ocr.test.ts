@@ -1078,7 +1078,7 @@ describe('UFSC Moodle MCP v1.2.0 — Grupos Definitivos, Avaliações em Lote, P
     const toolsList = await mcpClient.listTools();
     const names = toolsList.tools.map((t) => t.name);
 
-    expect(names.length).toBe(30);
+    expect(names.length).toBe(34);
     expect(names).toContain('download_moodle_file');
     expect(names).toContain('read_moodle_file');
     expect(names).toContain('get_moodle_capabilities');
@@ -1088,6 +1088,10 @@ describe('UFSC Moodle MCP v1.2.0 — Grupos Definitivos, Avaliações em Lote, P
     expect(names).toContain('verify_grading_batch');
     expect(names).toContain('replace_course_resource_file');
     expect(names).toContain('verify_course_resource_file');
+    expect(names).toContain('get_assignment_details');
+    expect(names).toContain('prepare_assignment_update');
+    expect(names).toContain('commit_assignment_update');
+    expect(names).toContain('verify_assignment_update');
 
     // Verify ChatGPT / OpenAI MCP connector compatibility: NO schema uses format: "uri"
     for (const tool of toolsList.tools) {
@@ -1108,8 +1112,8 @@ describe('UFSC Moodle MCP v1.2.0 — Grupos Definitivos, Avaliações em Lote, P
     expect(capRes.isError).toBeFalsy();
     const caps = parseToolJson(capRes);
 
-    expect(caps.serverVersion).toBe('1.3.0');
-    expect(caps.availableToolsCount).toBe(30);
+    expect(caps.serverVersion).toBe('1.4.0');
+    expect(caps.availableToolsCount).toBe(34);
     expect(caps.moodleSite.connected).toBe(true);
     expect(caps.moodleSite.release).toContain('4.1.5+');
     expect(caps.ocr.available).toBe(true);

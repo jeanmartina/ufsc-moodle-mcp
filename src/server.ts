@@ -35,9 +35,13 @@ import {
   getOrCreateResourceManager,
   MoodleResourceError,
 } from './resource-manager.js';
+import {
+  getOrCreateAssignmentManager,
+  MoodleAssignmentError,
+} from './assignment-manager.js';
 import { withOperationMetrics } from './request-context.js';
 
-export const SERVER_VERSION = '1.3.0';
+export const SERVER_VERSION = '1.4.0';
 export const MCP_PROTOCOL_VERSION = '2025-03-26';
 
 export const REGISTERED_TOOL_NAMES = [
@@ -71,6 +75,10 @@ export const REGISTERED_TOOL_NAMES = [
   'create_group_with_members',
   'replace_course_resource_file',
   'verify_course_resource_file',
+  'get_assignment_details',
+  'prepare_assignment_update',
+  'commit_assignment_update',
+  'verify_assignment_update',
 ] as const;
 
 function jsonResponse(data: unknown, isError = false): CallToolResult {
@@ -95,7 +103,8 @@ function errorResponse(error: unknown, client?: MoodleClient): CallToolResult {
   if (
     error instanceof MoodleGroupError ||
     error instanceof MoodleGradingError ||
-    error instanceof MoodleResourceError
+    error instanceof MoodleResourceError ||
+    error instanceof MoodleAssignmentError
   ) {
     return {
       content: [
@@ -180,13 +189,14 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
   const groupManager = getOrCreateGroupManager(client);
   const gradingBatchManager = getOrCreateGradingBatchManager(client);
   const resourceManager = getOrCreateResourceManager(client, config);
+  const assignmentManager = getOrCreateAssignmentManager(client, config);
 
   const server = new McpServer(
     {
       name: 'ufsc-moodle-mcp',
       title: 'UFSC Moodle MCP Server',
       description:
-        'Integração segura v1.3.0 para o Moodle da UFSC: resolução determinística de grupos de projeto vs turmas gerais, OCR local automático com layout visual estruturado (Tesseract + Poppler), download binário preservado, visão consolidada em lote de avaliações, fluxo auditado prepare/commit/verify e atualização atômica e verificada de arquivos PDF em recursos didáticos existentes (mod_resource) via replace_course_resource_file e verify_course_resource_file.',
+        'Integração segura v1.4.0 para o Moodle da UFSC: consulta completa e segura de tarefas mod_assign (get_assignment_details), fluxo auditado em duas etapas de preparação e alteração (prepare_assignment_update / commit_assignment_update) com verificação pós-escrita (verify_assignment_update) para enunciado, prazos independentes (dueDate vs cutoffDate), visibilidade e arquivos de entrega (.pdf, .zip), resolução determinística de grupos de projeto, OCR local com layout estruturado, download binário preservado e atualização verificada de arquivos didáticos mod_resource.',
       version: SERVER_VERSION,
     },
     {
@@ -195,11 +205,13 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
         resources: { listChanged: true },
       },
       instructions:
-        'Use get_moodle_capabilities para inspecionar ferramentas expostas, limites, OCR e capacidades do servidor v1.3.0. ' +
-        'Para avaliar uma tarefa de turma inteira com mínima latência: (1) chame get_assignment_grading_overview(assignmentId) para obter resumo da tarefa, grupos efetivos (excluindo grupos gerais de turma), entregas, notas agregadas/individuais, comentários de feedback e cobertura; ' +
-        '(2) use get_submission_content(assignmentId, groupId ou studentId, extractFiles=true, ocrMode="auto") ou read_moodle_file(..., ocrMode="auto") para ler tanto PDFs nativos quanto PDFs digitalizados/Canvas com coordenadas visuais sem precisar sair do MCP (ou download_moodle_file para obter o binário original); ' +
-        '(3) NUNCA altere notas/feedbacks sem revisão do professor: gere primeiro uma prévia estritamente de leitura com prepare_grading_batch, apresente ao professor, publique somente após confirmação explícita via commit_grading_batch (com planId, approvedPlanHash, confirmedByReviewer=true, operationId, publicationState e notificationPolicy) e valide em seguida com verify_grading_batch. ' +
-        '(4) Para atualizar arquivos PDF de materiais didáticos (mod_resource) exportados pelo Google Drive MCP ou outra origem: utilize replace_course_resource_file (suporta dryRun, verificação de hash, preservação de cmid e URL pública) e verify_course_resource_file.',
+        'Use get_moodle_capabilities para inspecionar ferramentas expostas, limites, OCR e capacidades do servidor v1.4.0. ' +
+        'Para gerenciar tarefas (mod_assign): (1) Chame get_assignment_details(courseId, assignmentId) para leitura completa (enunciado, status do enunciado, datas com timezone, visibilidade de módulo e seção e limites de arquivos de entrega); ' +
+        '(2) Prepare a alteração com prepare_assignment_update (gera diff legível, hash criptográfico e validações sem escrever no Moodle); ' +
+        '(3) Aplique o plano aprovado com commit_assignment_update (exige planId, planHash e confirmedByReviewer=true; detecta concorrência e grava via controlador oficial); ' +
+        '(4) Valide o resultado com verify_assignment_update. ' +
+        'Para avaliar tarefas em lote: use get_assignment_grading_overview, prepare_grading_batch, commit_grading_batch e verify_grading_batch. ' +
+        'Para materiais didáticos: use replace_course_resource_file e verify_course_resource_file.',
     }
   );
 
@@ -2985,6 +2997,10 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
               courseGroupManagement: true,
               resourcePdfReplacement: true,
               resourceIntegrityVerification: true,
+              assignmentDetailsInspection: true,
+              assignmentUpdatePreparation: true,
+              assignmentUpdateControlledCommit: true,
+              assignmentPostUpdateVerification: true,
             },
             ocr: ocrCaps,
             limits: {
@@ -2996,6 +3012,33 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
               ocrTimeoutMs: ocrCaps.timeoutMs,
               ocrPageTimeoutMs: ocrCaps.pageTimeoutMs,
               ocrMaxConcurrency: ocrCaps.maxConcurrency,
+            },
+            assignmentManagement: {
+              supported: true,
+              tools: [
+                'get_assignment_details',
+                'prepare_assignment_update',
+                'commit_assignment_update',
+                'verify_assignment_update',
+              ],
+              supportedPatchFields: [
+                'intro',
+                'visible',
+                'alwaysShowDescription',
+                'allowSubmissionsFromDate',
+                'dueDate',
+                'cutoffDate',
+                'fileSubmissionEnabled',
+                'fileTypes',
+                'maxFiles',
+                'maxSizeBytes',
+              ],
+              supportsTwoPhaseCommit: true,
+              optimisticConcurrencyProtection: true,
+              requiresReviewerConfirmation: true,
+              independentCutoffDate: true,
+              idempotencySupported: true,
+              timeZoneHandling: 'explicit_offset_or_iana',
             },
             batchOperations: {
               supported: true,
@@ -3544,6 +3587,295 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
       try {
         const { result, metrics } = await withOperationMetrics(async () =>
           resourceManager.verifyCourseResourceFile(params)
+        );
+        return jsonResponse({
+          ...result,
+          metrics,
+        });
+      } catch (err) {
+        return errorResponse(err, client);
+      }
+    }
+  );
+
+  // 31. get_assignment_details
+  server.registerTool(
+    'get_assignment_details',
+    {
+      title: 'Consultar detalhes completos, enunciado, datas e visibilidade de tarefa (mod_assign)',
+      description:
+        'Realiza leitura completa e segura de uma tarefa (mod_assign) no Moodle UFSC. Distingue explicitamente o estado do enunciado (presente, vazio, não retornado ou não autorizado), avalia visibilidade de módulo e seção, datas com conversão explícita de fuso horário (local America/Sao_Paulo e UTC), configurações de envio de arquivos (.pdf, .zip, quantidade máxima, limites de tamanho), modalidade em grupo, nota máxima e gera um fingerprint de estado para detecção de concorrência.',
+      inputSchema: z.object({
+        courseId: z
+          .number()
+          .int()
+          .positive()
+          .describe('ID numérico da disciplina no Moodle (ex: 49472).'),
+        assignmentId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('ID numérico da tarefa no Moodle (ex: 125468). Opcional se courseModuleId for fornecido.'),
+        courseModuleId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('ID numérico do módulo da tarefa no curso (cmid, ex: 1569058). Opcional se assignmentId for fornecido.'),
+      }),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (params) => {
+      try {
+        const { result, metrics } = await withOperationMetrics(async () =>
+          assignmentManager.getAssignmentDetails(params)
+        );
+        return jsonResponse({
+          ...result,
+          metrics,
+        });
+      } catch (err) {
+        return errorResponse(err, client);
+      }
+    }
+  );
+
+  // 32. prepare_assignment_update
+  server.registerTool(
+    'prepare_assignment_update',
+    {
+      title: 'Preparar plano não-destrutivo de alteração de tarefa (mod_assign)',
+      description:
+        'Prepara um plano auditado de atualização para uma tarefa no Moodle SEM executar qualquer gravação. Recebe um patch parcial explícito (campos omitidos são rigorosamente preservados), valida formato de enunciado, visibilidade, datas com fuso horário (tratando vencimento e encerramento de forma independente), configurações de arquivos de entrega (.pdf, .zip, limites). Gera diff legível, lista de campos inalterados, identificador de plano (planId) e hash de aprovação com validade de 1 hora.',
+      inputSchema: z.object({
+        courseId: z
+          .number()
+          .int()
+          .positive()
+          .describe('ID numérico da disciplina no Moodle (ex: 49472).'),
+        assignmentId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('ID numérico da tarefa no Moodle (ex: 125468).'),
+        courseModuleId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('ID numérico do módulo da tarefa no curso (cmid, ex: 1569058).'),
+        patch: z
+          .object({
+            intro: z
+              .string()
+              .optional()
+              .describe('Novo enunciado da tarefa em HTML. Preservar tags, listas, tabelas e código.'),
+            clearIntro: z
+              .boolean()
+              .optional()
+              .describe('Proteção obrigatória para limpeza intencional do enunciado quando intro for vazio ("").'),
+            introFormat: z
+              .number()
+              .int()
+              .optional()
+              .describe('Formato do editor de texto (padrão: 1 = HTML).'),
+            visible: z
+              .boolean()
+              .optional()
+              .describe('Visibilidade da tarefa no curso (true = visível, false = oculta).'),
+            alwaysShowDescription: z
+              .boolean()
+              .optional()
+              .describe('Exibir enunciado antes da data de início das submissões.'),
+            allowSubmissionsFromDate: z
+              .object({
+                enabled: z.boolean().describe('Habilitar data de abertura para submissões.'),
+                date: z
+                  .string()
+                  .optional()
+                  .describe('Data e hora no formato ISO com offset (ex: 2026-11-20T08:00:00-03:00) ou UTC (Z).'),
+                timeZone: z.string().optional().describe('Fuso horário IANA (padrão: America/Sao_Paulo).'),
+              })
+              .nullable()
+              .optional()
+              .describe('Data de abertura para recebimento de entregas (null para desabilitar).'),
+            dueDate: z
+              .object({
+                enabled: z.boolean().describe('Habilitar prazo regular de vencimento.'),
+                date: z
+                  .string()
+                  .optional()
+                  .describe('Data e hora de vencimento ISO com offset (ex: 2026-11-26T23:59:00-03:00).'),
+                timeZone: z.string().optional().describe('Fuso horário IANA (padrão: America/Sao_Paulo).'),
+              })
+              .nullable()
+              .optional()
+              .describe('Data de vencimento. Alterar este campo NUNCA altera o cutoffDate.'),
+            cutoffDate: z
+              .object({
+                enabled: z.boolean().describe('Habilitar encerramento estrito de recebimento.'),
+                date: z
+                  .string()
+                  .optional()
+                  .describe('Data e hora limite no formato ISO com offset (ex: 2026-11-30T23:59:00-03:00).'),
+                timeZone: z.string().optional().describe('Fuso horário IANA (padrão: America/Sao_Paulo).'),
+              })
+              .nullable()
+              .optional()
+              .describe('Data de encerramento do recebimento. Totalmente independente de dueDate.'),
+            fileSubmissionEnabled: z
+              .boolean()
+              .optional()
+              .describe('Habilitar envio de arquivos pelos alunos.'),
+            fileTypes: z
+              .string()
+              .optional()
+              .describe('Tipos de arquivo aceitos separados por vírgula (ex: ".pdf,.zip").'),
+            maxFiles: z
+              .number()
+              .int()
+              .positive()
+              .optional()
+              .describe('Quantidade máxima de arquivos aceitos (mínimo 1).'),
+            maxSizeBytes: z
+              .number()
+              .int()
+              .nonnegative()
+              .optional()
+              .describe('Tamanho máximo em bytes por entrega (0 = limite do curso/site).'),
+          })
+          .describe('Conjunto de alterações propostas. Campos omitidos permanecem inalterados no Moodle.'),
+        allowReduceMaxFiles: z
+          .boolean()
+          .optional()
+          .describe('Aprovação explícita obrigatória se a alteração reduzir a quantidade máxima de arquivos.'),
+        expectedFingerprint: z
+          .string()
+          .optional()
+          .describe('Fingerprint de estado anterior para validação prévia de concorrência.'),
+        operationId: z
+          .string()
+          .optional()
+          .describe('Identificador único da operação para controle de idempotência.'),
+      }),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (params) => {
+      try {
+        const { result, metrics } = await withOperationMetrics(async () =>
+          assignmentManager.prepareAssignmentUpdate(params)
+        );
+        return jsonResponse({
+          ...result,
+          metrics,
+        });
+      } catch (err) {
+        return errorResponse(err, client);
+      }
+    }
+  );
+
+  // 33. commit_assignment_update
+  server.registerTool(
+    'commit_assignment_update',
+    {
+      title: 'Aplicar exclusivamente plano aprovado de alteração de tarefa (mod_assign)',
+      description:
+        'Aplica no Moodle com segurança o conjunto exato de modificações preparado por prepare_assignment_update. Exige planId, planHash criptográfico e confirmedByReviewer=true (trava de aprovação humana). Revalida permissões e estado atual no Moodle (detectando concorrência), grava via controlador oficial (/course/modedit.php), executa verificação independente pós-gravação e registra auditoria completa sem vazamento de credenciais.',
+      inputSchema: z.object({
+        planId: z
+          .string()
+          .describe('Identificador do plano gerado por prepare_assignment_update.'),
+        planHash: z
+          .string()
+          .describe('Hash HMAC-SHA256 de aprovação gerado por prepare_assignment_update.'),
+        confirmedByReviewer: z
+          .boolean()
+          .describe('Confirmação explícita do revisor humano (deve ser true). Trava contra execução acidental.'),
+        operationId: z
+          .string()
+          .optional()
+          .describe('Identificador de operação para repetição idempotente segura.'),
+      }),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (params) => {
+      try {
+        const { result, metrics } = await withOperationMetrics(async () =>
+          assignmentManager.commitAssignmentUpdate(params)
+        );
+        return jsonResponse({
+          ...result,
+          metrics,
+        });
+      } catch (err) {
+        return errorResponse(err, client);
+      }
+    }
+  );
+
+  // 34. verify_assignment_update
+  server.registerTool(
+    'verify_assignment_update',
+    {
+      title: 'Verificar independentemente estado persistido de tarefa no Moodle (mod_assign)',
+      description:
+        'Reler diretamente do Moodle uma tarefa atualizada (sem confiar em respostas intermediárias de escrita) e verifica se os campos esperados foram alterados e se os campos não modificados permaneceram íntegros (enunciado, datas, visibilidade, arquivos de entrega, modalidade individual/grupo e nota máxima).',
+      inputSchema: z.object({
+        courseId: z
+          .number()
+          .int()
+          .positive()
+          .describe('ID numérico da disciplina no Moodle (ex: 49472).'),
+        assignmentId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('ID numérico da tarefa no Moodle (ex: 125468).'),
+        courseModuleId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('ID numérico do módulo da tarefa no curso (cmid, ex: 1569058).'),
+        expectedChanges: z
+          .record(z.string(), z.any())
+          .optional()
+          .describe('Mapeamento dos campos e valores esperados alterados para conferência rigorosa.'),
+        expectedPreserved: z
+          .record(z.string(), z.any())
+          .optional()
+          .describe('Mapeamento dos campos que deveriam permanecer preservados.'),
+      }),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (params) => {
+      try {
+        const { result, metrics } = await withOperationMetrics(async () =>
+          assignmentManager.verifyAssignmentUpdate(params)
         );
         return jsonResponse({
           ...result,
