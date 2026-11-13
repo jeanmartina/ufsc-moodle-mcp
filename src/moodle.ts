@@ -1021,6 +1021,10 @@ export class MoodleClient {
     }
   }
 
+  public invalidateAssignmentIndexCache(): void {
+    this.assignmentIndexCache = undefined;
+  }
+
   /**
    * Validates that a file URL strictly belongs to the configured Moodle origin and
    * points to an authorized Moodle file delivery route (`pluginfile.php` or `draftfile.php`),

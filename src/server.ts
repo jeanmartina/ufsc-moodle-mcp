@@ -41,7 +41,7 @@ import {
 } from './assignment-manager.js';
 import { withOperationMetrics } from './request-context.js';
 
-export const SERVER_VERSION = '1.4.0';
+export const SERVER_VERSION = '1.4.1';
 export const MCP_PROTOCOL_VERSION = '2025-03-26';
 
 export const REGISTERED_TOOL_NAMES = [
@@ -89,6 +89,7 @@ function jsonResponse(data: unknown, isError = false): CallToolResult {
         text: JSON.stringify(data, null, 2),
       },
     ],
+    structuredContent: data as any,
     ...(isError ? { isError: true } : {}),
   };
 }
@@ -106,33 +107,37 @@ function errorResponse(error: unknown, client?: MoodleClient): CallToolResult {
     error instanceof MoodleResourceError ||
     error instanceof MoodleAssignmentError
   ) {
+    const errorBody = {
+      status: 'failed',
+      errorCode: error.code,
+      errorMessage: message,
+      ...(error.details ? error.details : {}),
+    };
     return {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(
-            {
-              status: 'failed',
-              errorCode: error.code,
-              errorMessage: message,
-              ...(error.details ? error.details : {}),
-            },
-            null,
-            2
-          ),
+          text: JSON.stringify(errorBody, null, 2),
         },
       ],
+      structuredContent: errorBody,
       isError: true,
     };
   }
 
+  const fallbackBody = {
+    status: 'failed',
+    errorCode: 'internal_error',
+    errorMessage: message,
+  };
   return {
     content: [
       {
         type: 'text',
-        text: JSON.stringify({ error: message }, null, 2),
+        text: JSON.stringify(fallbackBody, null, 2),
       },
     ],
+    structuredContent: fallbackBody,
     isError: true,
   };
 }
@@ -196,7 +201,7 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
       name: 'ufsc-moodle-mcp',
       title: 'UFSC Moodle MCP Server',
       description:
-        'Integração segura v1.4.0 para o Moodle da UFSC: consulta completa e segura de tarefas mod_assign (get_assignment_details), fluxo auditado em duas etapas de preparação e alteração (prepare_assignment_update / commit_assignment_update) com verificação pós-escrita (verify_assignment_update) para enunciado, prazos independentes (dueDate vs cutoffDate), visibilidade e arquivos de entrega (.pdf, .zip), resolução determinística de grupos de projeto, OCR local com layout estruturado, download binário preservado e atualização verificada de arquivos didáticos mod_resource.',
+        'Integração segura v1.4.1 para o Moodle da UFSC: consulta completa e segura de tarefas mod_assign (get_assignment_details), fluxo auditado em duas etapas de preparação e alteração (prepare_assignment_update / commit_assignment_update) com verificação pós-escrita (verify_assignment_update) para enunciado, prazos independentes (dueDate vs cutoffDate), visibilidade e arquivos de entrega (.pdf, .zip), resolução determinística de grupos de projeto, OCR local com layout estruturado, download binário preservado e atualização verificada de arquivos didáticos mod_resource.',
       version: SERVER_VERSION,
     },
     {
@@ -205,7 +210,7 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
         resources: { listChanged: true },
       },
       instructions:
-        'Use get_moodle_capabilities para inspecionar ferramentas expostas, limites, OCR e capacidades do servidor v1.4.0. ' +
+        'Use get_moodle_capabilities para inspecionar ferramentas expostas, limites, OCR e capacidades do servidor v1.4.1. ' +
         'Para gerenciar tarefas (mod_assign): (1) Chame get_assignment_details(courseId, assignmentId) para leitura completa (enunciado, status do enunciado, datas com timezone, visibilidade de módulo e seção e limites de arquivos de entrega); ' +
         '(2) Prepare a alteração com prepare_assignment_update (gera diff legível, hash criptográfico e validações sem escrever no Moodle); ' +
         '(3) Aplique o plano aprovado com commit_assignment_update (exige planId, planHash e confirmedByReviewer=true; detecta concorrência e grava via controlador oficial); ' +

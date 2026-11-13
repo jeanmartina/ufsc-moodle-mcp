@@ -14,11 +14,15 @@ export type AssignmentErrorCode =
   | 'insufficient_permissions'
   | 'invalid_patch'
   | 'invalid_date'
+  | 'invalid_argument'
   | 'concurrency_conflict'
   | 'plan_not_found'
   | 'plan_expired'
   | 'invalid_plan_hash'
   | 'approval_required'
+  | 'session_expired'
+  | 'form_rejected'
+  | 'write_not_confirmed'
   | 'moodle_api_error'
   | 'verification_failed'
   | 'idempotent_replay';
@@ -370,6 +374,125 @@ export function computeAssignmentFingerprint(data: {
   return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
+/**
+ * Robustly parses a <select> element's inner HTML, extracting the value of the option
+ * marked with `selected`. Correctly handles attributes where `value` appears before or after `selected`,
+ * and falls back to the first option if no option is selected.
+ */
+export function parseSelectValue(selectBody: string): string | null {
+  const optRegex = /<option\b([^>]*)>([\s\S]*?)<\/option>/gi;
+  let firstVal: string | null = null;
+  let match: RegExpExecArray | null;
+  while ((match = optRegex.exec(selectBody)) !== null) {
+    const attrs = match[1];
+    const valMatch = attrs.match(/\bvalue=["']([^"']*)["']/i) || attrs.match(/\bvalue=([^\s>]+)/i);
+    const val = valMatch ? valMatch[1] : match[2].trim();
+    if (firstVal === null) {
+      firstVal = val;
+    }
+    if (/\bselected\b/i.test(attrs)) {
+      return val;
+    }
+  }
+  return firstVal;
+}
+
+/**
+ * Normalizes expected date representations for verification.
+ * Supports:
+ * - false or { enabled: false }
+ * - Unix timestamp number
+ * - { enabled: true, timestamp: number }
+ * - { enabled: true, date: string, timeZone?: string }
+ * - ISO string with explicit timezone / offset
+ * Rejects invalid inputs before comparison; never returns or compares with undefined.
+ */
+export function normalizeExpectedDate(
+  input: unknown,
+  defaultTimeZone = 'America/Sao_Paulo'
+): { enabled: boolean; timestamp?: number; isoUtc?: string } {
+  if (input === null || input === undefined) {
+    throw new MoodleAssignmentError(
+      'invalid_argument',
+      'Expectativa de data inválida: valor nulo ou indefinido.'
+    );
+  }
+
+  // Case 1: Boolean false
+  if (input === false) {
+    return { enabled: false };
+  }
+
+  // Case 2: Object representation
+  if (typeof input === 'object' && input !== null) {
+    const obj = input as Record<string, any>;
+    if (obj.enabled === false) {
+      return { enabled: false };
+    }
+
+    if (typeof obj.timestamp === 'number') {
+      if (!Number.isFinite(obj.timestamp) || obj.timestamp <= 0) {
+        throw new MoodleAssignmentError(
+          'invalid_argument',
+          `Timestamp de data inválido: ${obj.timestamp}`
+        );
+      }
+      return {
+        enabled: true,
+        timestamp: Math.round(obj.timestamp),
+        isoUtc: obj.isoUtc || new Date(obj.timestamp * 1000).toISOString(),
+      };
+    }
+
+    if (typeof obj.date === 'string') {
+      const tz = obj.timeZone || defaultTimeZone;
+      const parsed = parseAndFormatMoodleDate(obj.date, tz);
+      return {
+        enabled: true,
+        timestamp: parsed.timestamp,
+        isoUtc: parsed.isoUtc,
+      };
+    }
+
+    if (obj.enabled === true && !obj.date && !obj.timestamp) {
+      throw new MoodleAssignmentError(
+        'invalid_argument',
+        'Expectativa de data com enabled=true requer fornecimento de "date" ou "timestamp".'
+      );
+    }
+  }
+
+  // Case 3: Numeric Unix timestamp
+  if (typeof input === 'number') {
+    if (!Number.isFinite(input) || input <= 0) {
+      throw new MoodleAssignmentError(
+        'invalid_argument',
+        `Timestamp de data inválido: ${input}`
+      );
+    }
+    return {
+      enabled: true,
+      timestamp: Math.round(input),
+      isoUtc: new Date(input * 1000).toISOString(),
+    };
+  }
+
+  // Case 4: Direct date string
+  if (typeof input === 'string') {
+    const parsed = parseAndFormatMoodleDate(input, defaultTimeZone);
+    return {
+      enabled: true,
+      timestamp: parsed.timestamp,
+      isoUtc: parsed.isoUtc,
+    };
+  }
+
+  throw new MoodleAssignmentError(
+    'invalid_argument',
+    `Formato de data não reconhecido para verificação: ${JSON.stringify(input)}`
+  );
+}
+
 export interface MoodleAssignmentManagerOptions {
   client: MoodleClient;
   config: MoodleConfig;
@@ -414,6 +537,7 @@ export class MoodleAssignmentManager {
   private readonly defaultTimeZone: string;
   private readonly plansStore = new Map<string, AssignmentUpdatePlan>();
   private readonly idempotencyStore = new Map<string, CommitAssignmentUpdateResult>();
+  private readonly inFlightOperations = new Set<string>();
 
   constructor(options: MoodleAssignmentManagerOptions) {
     this.client = options.client;
@@ -1069,250 +1193,364 @@ export class MoodleAssignmentManager {
       );
     }
 
-    // 3. Find and Validate Plan
-    const plan = this.plansStore.get(params.planId);
-    if (!plan) {
-      throw new MoodleAssignmentError(
-        'plan_not_found',
-        `Plano com ID "${params.planId}" não encontrado. Pode ter expirado ou o servidor foi reiniciado. Gere um novo plano com prepare_assignment_update.`
-      );
-    }
-
-    if (Date.now() > plan.expiresAtMs) {
-      this.plansStore.delete(params.planId);
-      throw new MoodleAssignmentError(
-        'plan_expired',
-        `O plano de alteração "${params.planId}" expirou em ${plan.expiresAt}. Gere um novo plano para aprovação.`
-      );
-    }
-
-    if (params.planHash.trim().toLowerCase() !== plan.planHash.toLowerCase()) {
-      throw new MoodleAssignmentError(
-        'invalid_plan_hash',
-        'Hash de aprovação do plano inválido ou adulterado. O plano não pode ser aplicado com hash divergente do gerado em prepare_assignment_update.'
-      );
-    }
-
-    // 4. Revalidate Actor Permissions and Live Moodle State
-    const actor = await this.checkCourseEditingPermission(plan.courseId);
-    const liveCurrent = await this.getAssignmentDetails({
-      courseId: plan.courseId,
-      assignmentId: plan.assignmentId,
-      courseModuleId: plan.courseModuleId,
-    });
-
-    // 5. Concurrency Protection Check
-    if (liveCurrent.stateFingerprint !== plan.previousFingerprint) {
+    // 3. Concurrency Protection: prevent concurrent execution of same operationId
+    if (params.operationId && this.inFlightOperations.has(params.operationId)) {
       throw new MoodleAssignmentError(
         'concurrency_conflict',
-        `Conflito de concorrência: a tarefa foi modificada no Moodle após a preparação do plano. ` +
-          `Fingerprint atual: "${liveCurrent.stateFingerprint}", Fingerprint do plano: "${plan.previousFingerprint}". ` +
-          `Gere um novo plano com prepare_assignment_update para incorporar as mudanças recentes.`,
-        { liveFingerprint: liveCurrent.stateFingerprint, planFingerprint: plan.previousFingerprint }
+        `A operação "${params.operationId}" já está em execução no momento.`
       );
     }
 
-    // 6. Check Web Session Credentials for Official Controller modedit.php
-    if (!this.webSession.hasCredentials() && !this.config.token) {
-      throw new MoodleAssignmentError(
-        'insufficient_permissions',
-        'Credenciais (MOODLE_USERNAME/MOODLE_PASSWORD) não configuradas para executar a gravação da tarefa via controlador oficial do Moodle (/course/modedit.php).'
-      );
-    }
-
-    // 7. Request Official modedit.php Form
-    const editPage = await this.webSession.requestPage(
-      `/course/modedit.php?update=${plan.courseModuleId}`
-    );
-
-    if (editPage.status !== 200 || !/name=["']_qf__mod_assign_mod_form["']/i.test(editPage.html)) {
-      const errs = extractMoodleFormErrors(editPage.html);
-      throw new MoodleAssignmentError(
-        'moodle_api_error',
-        `Não foi possível abrir o formulário de edição da tarefa (/course/modedit.php?update=${plan.courseModuleId}): ${
-          errs.join('; ') || 'falha de acesso ou permissão negada no Moodle'
-        }.`
-      );
-    }
-
-    // 8. Parse Existing Form Fields to Preserve ALL Unmodified Settings
-    const formFields = new URLSearchParams();
-    for (const tag of editPage.html.matchAll(/<input[^>]+>/gi)) {
-      const name = tag[0].match(/name=["']([^"']+)["']/i)?.[1];
-      const val = tag[0].match(/value=["']([^"']*)["']/i)?.[1] ?? '';
-      const type = tag[0].match(/type=["']([^"']+)["']/i)?.[1]?.toLowerCase() || 'text';
-      if (!name) continue;
-
-      if (type === 'checkbox' || type === 'radio') {
-        if (/\bchecked\b/i.test(tag[0])) {
-          formFields.set(name, val || '1');
-        }
-      } else if (type !== 'submit' && type !== 'button' && type !== 'image') {
-        formFields.set(name, val);
-      }
-    }
-
-    for (const tag of editPage.html.matchAll(
-      /<select[^>]*name=["']([^"']+)["'][^>]*>([\s\S]*?)<\/select>/gi
-    )) {
-      const name = tag[1];
-      const optMatch =
-        tag[2].match(/<option[^>]*\bselected\b[^>]*value=["']([^"']*)["']/i) ||
-        tag[2].match(/<option[^>]*value=["']([^"']*)["']/i);
-      if (optMatch) {
-        formFields.set(name, optMatch[1]);
-      }
-    }
-
-    for (const tag of editPage.html.matchAll(
-      /<textarea[^>]*name=["']([^"']+)["'][^>]*>([\s\S]*?)<\/textarea>/gi
-    )) {
-      formFields.set(tag[1], tag[2]);
-    }
-
-    // 9. Apply the Approved Patch to Form Fields
-    const patch = plan.patch;
-
-    // Intro statement
-    if (patch.intro !== undefined) {
-      formFields.set('introeditor[text]', patch.intro);
-      formFields.set('introeditor[format]', String(patch.introFormat ?? 1));
-    }
-
-    // Visibility
-    if (patch.visible !== undefined) {
-      formFields.set('visible', patch.visible ? '1' : '0');
-    }
-
-    // Always show description
-    if (patch.alwaysShowDescription !== undefined) {
-      formFields.set('alwaysshowdescription', patch.alwaysShowDescription ? '1' : '0');
-    }
-
-    // Date helper
-    const applyDateToForm = (prefix: string, datePatch?: DatePatchInput | null) => {
-      if (datePatch === undefined) return; // preserve
-      if (datePatch === null || !datePatch.enabled) {
-        formFields.delete(`${prefix}[enabled]`);
-        return;
-      }
-      formFields.set(`${prefix}[enabled]`, '1');
-      if (datePatch.date) {
-        const parsed = parseAndFormatMoodleDate(
-          datePatch.date,
-          datePatch.timeZone || this.defaultTimeZone
-        );
-        formFields.set(`${prefix}[day]`, String(parsed.parts.day));
-        formFields.set(`${prefix}[month]`, String(parsed.parts.month));
-        formFields.set(`${prefix}[year]`, String(parsed.parts.year));
-        formFields.set(`${prefix}[hour]`, String(parsed.parts.hour));
-        formFields.set(`${prefix}[minute]`, String(parsed.parts.minute));
-      }
-    };
-
-    applyDateToForm('allowsubmissionsfromdate', patch.allowSubmissionsFromDate);
-    applyDateToForm('duedate', patch.dueDate);
-    applyDateToForm('cutoffdate', patch.cutoffDate);
-
-    // File submission settings
-    if (patch.fileSubmissionEnabled !== undefined) {
-      if (patch.fileSubmissionEnabled) {
-        formFields.set('assignsubmission_file_enabled', '1');
-      } else {
-        formFields.delete('assignsubmission_file_enabled');
-      }
-    }
-
-    if (patch.maxFiles !== undefined) {
-      formFields.set('assignsubmission_file_maxfiles', String(patch.maxFiles));
-    }
-
-    if (patch.fileTypes !== undefined) {
-      formFields.set('assignsubmission_file_filetypes', patch.fileTypes);
-    }
-
-    if (patch.maxSizeBytes !== undefined) {
-      formFields.set('assignsubmission_file_maxsizebytes', String(patch.maxSizeBytes));
-    }
-
-    // Submit button
-    formFields.set('submitbutton', 'Save and return to course');
-
-    // 10. Execute POST to /course/modedit.php
-    const saveRes = await this.webSession.requestPage('/course/modedit.php', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: formFields.toString(),
-    });
-
-    if (/name=["']_qf__mod_assign_mod_form["']/i.test(saveRes.html)) {
-      const formErrors = extractMoodleFormErrors(saveRes.html);
-      throw new MoodleAssignmentError(
-        'moodle_api_error',
-        `O formulário do Moodle rejeitou a gravação da tarefa: ${
-          formErrors.join('; ') || 'erro de validação nos campos do formulário modedit.php'
-        }.`
-      );
-    }
-
-    // 11. Run Immediate Independent Verification
-    const verification = await this.verifyAssignmentUpdate({
-      courseId: plan.courseId,
-      assignmentId: plan.assignmentId,
-      courseModuleId: plan.courseModuleId,
-      expectedChanges: plan.proposedDiff,
-    });
-
-    if (!verification.verified) {
-      throw new MoodleAssignmentError(
-        'verification_failed',
-        `A gravação da tarefa foi submetida, mas a verificação pós-atualização detectou divergências: ${(
-          verification.divergences || []
-        ).join('; ')}`,
-        { verification }
-      );
-    }
-
-    const result: CommitAssignmentUpdateResult = {
-      success: true,
-      status: 'committed_and_verified',
-      operationId: params.operationId,
-      planId: plan.planId,
-      courseId: plan.courseId,
-      assignmentId: plan.assignmentId,
-      courseModuleId: plan.courseModuleId,
-      appliedDiff: plan.proposedDiff,
-      verification,
-      message:
-        `Tarefa "${liveCurrent.name}" (ID ${plan.assignmentId}, cmid ${plan.courseModuleId}) atualizada e verificada com sucesso no Moodle. ` +
-        `Campos alterados: [${Object.keys(plan.proposedDiff).join(', ')}].`,
-    };
-
-    // 12. Record Audit
-    this.recordAudit({
-      timestamp: new Date().toISOString(),
-      operationId: params.operationId,
-      planId: plan.planId,
-      planHash: plan.planHash,
-      actor: { userId: actor.userId, username: actor.username },
-      courseId: plan.courseId,
-      assignmentId: plan.assignmentId,
-      courseModuleId: plan.courseModuleId,
-      assignmentName: liveCurrent.name,
-      diff: plan.proposedDiff,
-      verified: verification.verified,
-      status: 'committed_and_verified',
-    });
-
-    // 13. Idempotency store
     if (params.operationId) {
-      this.idempotencyStore.set(params.operationId, result);
+      this.inFlightOperations.add(params.operationId);
     }
 
-    // 14. Invalidate used plan
-    this.plansStore.delete(params.planId);
+    try {
+      // 4. Find and Validate Plan
+      const plan = this.plansStore.get(params.planId);
+      if (!plan) {
+        throw new MoodleAssignmentError(
+          'plan_not_found',
+          `Plano com ID "${params.planId}" não encontrado. Pode ter expirado ou o servidor foi reiniciado. Gere um novo plano com prepare_assignment_update.`
+        );
+      }
 
-    return result;
+      if (Date.now() > plan.expiresAtMs) {
+        this.plansStore.delete(params.planId);
+        throw new MoodleAssignmentError(
+          'plan_expired',
+          `O plano de alteração "${params.planId}" expirou em ${plan.expiresAt}. Gere um novo plano para aprovação.`
+        );
+      }
+
+      if (params.planHash.trim().toLowerCase() !== plan.planHash.toLowerCase()) {
+        throw new MoodleAssignmentError(
+          'invalid_plan_hash',
+          'Hash de aprovação do plano inválido ou adulterado. O plano não pode ser aplicado com hash divergente do gerado em prepare_assignment_update.'
+        );
+      }
+
+      // 5. Revalidate Actor Permissions and Live Moodle State
+      const actor = await this.checkCourseEditingPermission(plan.courseId);
+      this.client.invalidateAssignmentIndexCache();
+      const liveCurrent = await this.getAssignmentDetails({
+        courseId: plan.courseId,
+        assignmentId: plan.assignmentId,
+        courseModuleId: plan.courseModuleId,
+      });
+
+      // 6. Concurrency Protection Check against fingerprint
+      if (liveCurrent.stateFingerprint !== plan.previousFingerprint) {
+        throw new MoodleAssignmentError(
+          'concurrency_conflict',
+          `Conflito de concorrência: a tarefa foi modificada no Moodle após a preparação do plano. ` +
+            `Fingerprint atual: "${liveCurrent.stateFingerprint}", Fingerprint do plano: "${plan.previousFingerprint}". ` +
+            `Gere um novo plano com prepare_assignment_update para incorporar as mudanças recentes.`,
+          { liveFingerprint: liveCurrent.stateFingerprint, planFingerprint: plan.previousFingerprint }
+        );
+      }
+
+      // 7. Check Web Session Credentials for Official Controller modedit.php
+      if (!this.webSession.hasCredentials() && !this.config.token) {
+        throw new MoodleAssignmentError(
+          'insufficient_permissions',
+          'Credenciais (MOODLE_USERNAME/MOODLE_PASSWORD) não configuradas para executar a gravação da tarefa via controlador oficial do Moodle (/course/modedit.php).'
+        );
+      }
+
+      // 8. Request Official modedit.php Form
+      let editPage;
+      try {
+        editPage = await this.webSession.requestPage(
+          `/course/modedit.php?update=${plan.courseModuleId}`
+        );
+      } catch (err: any) {
+        if (err?.code === 'auth_failed') {
+          throw new MoodleAssignmentError(
+            'session_expired',
+            'A sessão autenticada do Moodle expirou ao carregar o formulário de edição da tarefa.'
+          );
+        }
+        throw err;
+      }
+
+      if (
+        editPage.url.includes('/login/') ||
+        editPage.url.includes('sistemas.ufsc.br') ||
+        /<form[^>]*id=["']fm1["']/i.test(editPage.html) ||
+        /<form[^>]*id=["']login["']/i.test(editPage.html)
+      ) {
+        throw new MoodleAssignmentError(
+          'session_expired',
+          'A sessão autenticada do Moodle expirou ao carregar o formulário de edição da tarefa (redirecionado para tela de login).'
+        );
+      }
+
+      if (editPage.status !== 200 || !/name=["']_qf__mod_assign_mod_form["']/i.test(editPage.html)) {
+        const errs = extractMoodleFormErrors(editPage.html);
+        throw new MoodleAssignmentError(
+          'moodle_api_error',
+          `Não foi possível abrir o formulário de edição da tarefa (/course/modedit.php?update=${plan.courseModuleId}): ${
+            errs.join('; ') || 'falha de acesso ou permissão negada no Moodle'
+          }.`
+        );
+      }
+
+      // 9. Parse Existing Form Fields to Preserve ALL Unmodified Settings
+      const formFields = new URLSearchParams();
+      for (const tag of editPage.html.matchAll(/<input[^>]+>/gi)) {
+        const name = tag[0].match(/name=["']([^"']+)["']/i)?.[1];
+        const val = tag[0].match(/value=["']([^"']*)["']/i)?.[1] ?? '';
+        const type = tag[0].match(/type=["']([^"']+)["']/i)?.[1]?.toLowerCase() || 'text';
+        if (!name) continue;
+
+        if (type === 'checkbox' || type === 'radio') {
+          if (/\bchecked\b/i.test(tag[0])) {
+            formFields.set(name, val || '1');
+          }
+        } else if (type !== 'submit' && type !== 'button' && type !== 'image') {
+          formFields.set(name, val);
+        }
+      }
+
+      for (const tag of editPage.html.matchAll(
+        /<select[^>]*name=["']([^"']+)["'][^>]*>([\s\S]*?)<\/select>/gi
+      )) {
+        const name = tag[1];
+        const selectedVal = parseSelectValue(tag[2]);
+        if (selectedVal !== null) {
+          formFields.set(name, selectedVal);
+        }
+      }
+
+      for (const tag of editPage.html.matchAll(
+        /<textarea[^>]*name=["']([^"']+)["'][^>]*>([\s\S]*?)<\/textarea>/gi
+      )) {
+        formFields.set(tag[1], tag[2]);
+      }
+
+      // 10. Apply the Approved Patch to Form Fields
+      const patch = plan.patch;
+
+      // Intro statement
+      if (patch.intro !== undefined) {
+        formFields.set('introeditor[text]', patch.intro);
+        formFields.set('introeditor[format]', String(patch.introFormat ?? 1));
+      }
+
+      // Visibility
+      if (patch.visible !== undefined) {
+        formFields.set('visible', patch.visible ? '1' : '0');
+      }
+
+      // Always show description
+      if (patch.alwaysShowDescription !== undefined) {
+        formFields.set('alwaysshowdescription', patch.alwaysShowDescription ? '1' : '0');
+        formFields.set('showdescription', patch.alwaysShowDescription ? '1' : '0');
+      }
+
+      // Date helper
+      const applyDateToForm = (prefix: string, datePatch?: DatePatchInput | null) => {
+        if (datePatch === undefined) return; // preserve
+        if (datePatch === null || !datePatch.enabled) {
+          formFields.delete(`${prefix}[enabled]`);
+          return;
+        }
+        formFields.set(`${prefix}[enabled]`, '1');
+        if (datePatch.date) {
+          const parsed = parseAndFormatMoodleDate(
+            datePatch.date,
+            datePatch.timeZone || this.defaultTimeZone
+          );
+          formFields.set(`${prefix}[day]`, String(parsed.parts.day));
+          formFields.set(`${prefix}[month]`, String(parsed.parts.month));
+          formFields.set(`${prefix}[year]`, String(parsed.parts.year));
+          formFields.set(`${prefix}[hour]`, String(parsed.parts.hour));
+          formFields.set(`${prefix}[minute]`, String(parsed.parts.minute));
+        }
+      };
+
+      applyDateToForm('allowsubmissionsfromdate', patch.allowSubmissionsFromDate);
+      applyDateToForm('duedate', patch.dueDate);
+      applyDateToForm('cutoffdate', patch.cutoffDate);
+
+      // File submission settings
+      if (patch.fileSubmissionEnabled !== undefined) {
+        if (patch.fileSubmissionEnabled) {
+          formFields.set('assignsubmission_file_enabled', '1');
+        } else {
+          formFields.delete('assignsubmission_file_enabled');
+        }
+      }
+
+      if (patch.maxFiles !== undefined) {
+        formFields.set('assignsubmission_file_maxfiles', String(patch.maxFiles));
+      }
+
+      if (patch.fileTypes !== undefined) {
+        formFields.set('assignsubmission_file_filetypes', patch.fileTypes);
+        formFields.set('assignsubmission_file_filetypes[filetypes]', patch.fileTypes);
+      }
+
+      if (patch.maxSizeBytes !== undefined) {
+        formFields.set('assignsubmission_file_maxsizebytes', String(patch.maxSizeBytes));
+      }
+
+      // Submit button: Set submitbutton2 ("Salvar e voltar ao curso") and never cancel
+      formFields.delete('cancel');
+      formFields.delete('submitbutton');
+      formFields.set('submitbutton2', 'Salvar e voltar ao curso');
+
+      // 11. Execute POST to /course/modedit.php
+      let saveRes;
+      try {
+        saveRes = await this.webSession.requestPage('/course/modedit.php', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: formFields.toString(),
+        });
+      } catch (err: any) {
+        if (err?.code === 'auth_failed') {
+          throw new MoodleAssignmentError(
+            'session_expired',
+            'A sessão autenticada do Moodle expirou durante a gravação da tarefa (redirecionado para tela de login).'
+          );
+        }
+        throw err;
+      }
+
+      // Check A: session expired or login redirect
+      if (
+        saveRes.url.includes('/login/') ||
+        saveRes.url.includes('sistemas.ufsc.br') ||
+        /<form[^>]*id=["']fm1["']/i.test(saveRes.html) ||
+        /<form[^>]*id=["']login["']/i.test(saveRes.html)
+      ) {
+        throw new MoodleAssignmentError(
+          'session_expired',
+          'A sessão autenticada do Moodle expirou durante a gravação da tarefa (redirecionado para tela de login).'
+        );
+      }
+
+      // Check B: form rejected (re-rendered form with validation errors)
+      const isEditFormPresented =
+        /<input[^>]+name=["']_qf__mod_assign_mod_form["']/i.test(saveRes.html) ||
+        /<form[^>]+id=["']mform1["']/i.test(saveRes.html) ||
+        /<(?:div|span)[^>]*id=["']id_error_/i.test(saveRes.html);
+
+      if (isEditFormPresented) {
+        const formErrors = extractMoodleFormErrors(saveRes.html);
+        throw new MoodleAssignmentError(
+          'form_rejected',
+          `O formulário do Moodle rejeitou a gravação da tarefa: ${
+            formErrors.join('; ') || 'erro de validação nos campos do formulário modedit.php'
+          }.`,
+          { validationErrors: formErrors }
+        );
+      }
+
+      // Check C: fatal Moodle error page
+      if (
+        /<div[^>]*class=["'][^"']*errorbox[^"']*["']/i.test(saveRes.html) ||
+        (/sesskey/i.test(saveRes.html) && /invalid/i.test(saveRes.html))
+      ) {
+        const errs = extractMoodleFormErrors(saveRes.html);
+        throw new MoodleAssignmentError(
+          'moodle_api_error',
+          `Erro retornado pelo Moodle na gravação da tarefa: ${errs.join('; ') || 'erro fatal retornado pelo Moodle'}.`,
+          { errors: errs }
+        );
+      }
+
+      // Check D: unconfirmed write (neither redirected to course view nor activity view)
+      const isConfirmedRedirect =
+        saveRes.url.includes('/course/view.php') ||
+        saveRes.url.includes('/mod/assign/view.php');
+
+      if (!isConfirmedRedirect) {
+        throw new MoodleAssignmentError(
+          'write_not_confirmed',
+          `A submissão do formulário retornou status HTTP ${saveRes.status} e URL inesperada (${saveRes.url}), não confirmando o salvamento da tarefa.`
+        );
+      }
+
+      // 12. Run Immediate Independent Verification with Fresh State
+      this.client.invalidateAssignmentIndexCache();
+
+      const expectedPreserved: Record<string, any> = {};
+      if (plan.unchangedFields) {
+        for (const field of plan.unchangedFields) {
+          if (field === 'name') expectedPreserved.name = liveCurrent.name;
+          else if (field === 'maxGrade') expectedPreserved.maxGrade = liveCurrent.settings.maxGrade;
+          else if (field === 'teamSubmission') expectedPreserved.teamSubmission = liveCurrent.settings.teamSubmission;
+          else if (field === 'introAttachments') expectedPreserved.introAttachments = liveCurrent.intro.attachments;
+          else if (field === 'cutoffDate' && !plan.patch.cutoffDate) expectedPreserved.cutoffDate = liveCurrent.dates.cutoffDate;
+        }
+      }
+
+      const verification = await this.verifyAssignmentUpdate({
+        courseId: plan.courseId,
+        assignmentId: plan.assignmentId,
+        courseModuleId: plan.courseModuleId,
+        expectedChanges: plan.proposedDiff,
+        expectedPreserved,
+      });
+
+      if (!verification.verified) {
+        throw new MoodleAssignmentError(
+          'verification_failed',
+          `A gravação da tarefa foi submetida, mas a verificação pós-atualização detectou divergências: ${(
+            verification.divergences || []
+          ).join('; ')}`,
+          { verification }
+        );
+      }
+
+      const result: CommitAssignmentUpdateResult = {
+        success: true,
+        status: 'committed_and_verified',
+        operationId: params.operationId,
+        planId: plan.planId,
+        courseId: plan.courseId,
+        assignmentId: plan.assignmentId,
+        courseModuleId: plan.courseModuleId,
+        appliedDiff: plan.proposedDiff,
+        verification,
+        message:
+          `Tarefa "${liveCurrent.name}" (ID ${plan.assignmentId}, cmid ${plan.courseModuleId}) atualizada e verificada com sucesso no Moodle. ` +
+          `Campos alterados: [${Object.keys(plan.proposedDiff).join(', ')}].`,
+      };
+
+      // 13. Record Audit
+      this.recordAudit({
+        timestamp: new Date().toISOString(),
+        operationId: params.operationId,
+        planId: plan.planId,
+        planHash: plan.planHash,
+        actor: { userId: actor.userId, username: actor.username },
+        courseId: plan.courseId,
+        assignmentId: plan.assignmentId,
+        courseModuleId: plan.courseModuleId,
+        assignmentName: liveCurrent.name,
+        diff: plan.proposedDiff,
+        verified: verification.verified,
+        status: 'committed_and_verified',
+      });
+
+      // 14. Idempotency store
+      if (params.operationId) {
+        this.idempotencyStore.set(params.operationId, result);
+      }
+
+      // 15. Invalidate used plan
+      this.plansStore.delete(params.planId);
+
+      return result;
+    } finally {
+      if (params.operationId) {
+        this.inFlightOperations.delete(params.operationId);
+      }
+    }
   }
 
   /**
@@ -1321,6 +1559,8 @@ export class MoodleAssignmentManager {
   public async verifyAssignmentUpdate(
     params: VerifyAssignmentUpdateParams
   ): Promise<VerifyAssignmentUpdateResult> {
+    this.client.invalidateAssignmentIndexCache();
+
     const currentDetails = await this.getAssignmentDetails({
       courseId: params.courseId,
       assignmentId: params.assignmentId,
@@ -1333,100 +1573,222 @@ export class MoodleAssignmentManager {
     };
     const divergences: string[] = [];
 
-    // Verify expected changes if provided
-    if (params.expectedChanges) {
-      for (const [key, diff] of Object.entries(params.expectedChanges)) {
-        const expected = diff.proposed !== undefined ? diff.proposed : diff;
+    const verifyKey = (
+      key: string,
+      rawExpected: any,
+      isPreserved: boolean
+    ) => {
+      const expected =
+        rawExpected !== null && typeof rawExpected === 'object' && rawExpected.proposed !== undefined
+          ? rawExpected.proposed
+          : rawExpected;
 
-        if (key === 'intro') {
-          // Normalize whitespace and compare
+      const checkPrefix = isPreserved ? `${key}Preserved` : `${key}Matches`;
+
+      switch (key) {
+        case 'name': {
+          const expName = String(expected ?? '').trim();
+          const actName = String(currentDetails.name ?? '').trim();
+          const matches = expName === actName;
+          checks[checkPrefix] = matches;
+          if (!matches) {
+            divergences.push(
+              `Nome (${actName}) diverge do esperado (${expName})`
+            );
+          }
+          break;
+        }
+
+        case 'intro': {
           const expNorm = String(expected || '').trim();
           const actNorm = String(currentDetails.intro.html || '').trim();
           const matches = expNorm === actNorm || expNorm === htmlToText(actNorm);
-          checks.introMatches = matches;
+          checks[checkPrefix] = matches;
           if (!matches) {
-            divergences.push(`Enunciado diverge do esperado`);
+            divergences.push('Enunciado diverge do esperado');
           }
-        } else if (key === 'visible') {
-          const matches = currentDetails.visibility.moduleVisible === Boolean(expected);
-          checks.visibleMatches = matches;
+          break;
+        }
+
+        case 'visible': {
+          const expBool = Boolean(expected);
+          const actBool = currentDetails.visibility.moduleVisible;
+          const matches = actBool === expBool;
+          checks[checkPrefix] = matches;
           if (!matches) {
             divergences.push(
-              `Visibilidade (${currentDetails.visibility.moduleVisible}) diverge do esperado (${expected})`
+              `Visibilidade (${actBool}) diverge do esperado (${expBool})`
             );
           }
-        } else if (key === 'alwaysShowDescription') {
-          const matches = currentDetails.dates.alwaysShowDescription === Boolean(expected);
-          checks.alwaysShowDescriptionMatches = matches;
+          break;
+        }
+
+        case 'alwaysShowDescription': {
+          const expBool = Boolean(expected);
+          const actBool = currentDetails.dates.alwaysShowDescription;
+          const matches = actBool === expBool;
+          checks[checkPrefix] = matches;
           if (!matches) {
-            divergences.push(`alwaysShowDescription diverge do esperado`);
+            divergences.push(
+              `alwaysShowDescription (${actBool}) diverge do esperado (${expBool})`
+            );
           }
-        } else if (key === 'dueDate') {
-          if (expected.enabled) {
-            const expTs = expected.timestamp;
-            const actTs = currentDetails.dates.dueDate.timestamp;
-            const matches = expTs && actTs ? Math.abs(expTs - actTs) < 60 : false;
-            checks.dueDateMatches = matches;
+          break;
+        }
+
+        case 'dueDate':
+        case 'cutoffDate':
+        case 'allowSubmissionsFromDate':
+        case 'gradingDueDate': {
+          const normExp = normalizeExpectedDate(expected, this.defaultTimeZone);
+          const actDateObj = (currentDetails.dates as any)[key];
+          if (!actDateObj) {
+            checks[checkPrefix] = false;
+            divergences.push(`Campo de data "${key}" não encontrado nos detalhes da tarefa`);
+            break;
+          }
+
+          if (normExp.enabled) {
+            const expTs = normExp.timestamp;
+            const actTs = actDateObj.timestamp;
+            const actEnabled = actDateObj.enabled;
+            const matches = actEnabled && expTs !== undefined && actTs !== undefined
+              ? Math.abs(expTs - actTs) < 60
+              : false;
+            checks[checkPrefix] = matches;
             if (!matches) {
               divergences.push(
-                `dueDate timestamp (${actTs}) diverge do esperado (${expTs}, iso: ${expected.isoUtc})`
+                `${key} timestamp (${actTs}, enabled: ${actEnabled}) diverge do esperado (${expTs}, enabled: true)`
               );
             }
           } else {
-            checks.dueDateMatches = !currentDetails.dates.dueDate.enabled;
-            if (currentDetails.dates.dueDate.enabled) {
-              divergences.push('dueDate deveria estar desabilitado mas permaneceu ativo');
-            }
-          }
-        } else if (key === 'cutoffDate') {
-          if (expected.enabled) {
-            const expTs = expected.timestamp;
-            const actTs = currentDetails.dates.cutoffDate.timestamp;
-            const matches = expTs && actTs ? Math.abs(expTs - actTs) < 60 : false;
-            checks.cutoffDateMatches = matches;
+            const matches = !actDateObj.enabled;
+            checks[checkPrefix] = matches;
             if (!matches) {
-              divergences.push(`cutoffDate timestamp (${actTs}) diverge do esperado (${expTs})`);
-            }
-          } else {
-            checks.cutoffDateMatches = !currentDetails.dates.cutoffDate.enabled;
-            if (currentDetails.dates.cutoffDate.enabled) {
-              divergences.push('cutoffDate deveria estar desabilitado mas permaneceu ativo');
+              divergences.push(`${key} deveria estar desabilitado mas permaneceu ativo (${actDateObj.timestamp})`);
             }
           }
-        } else if (key === 'allowSubmissionsFromDate') {
-          if (expected.enabled) {
-            const expTs = expected.timestamp;
-            const actTs = currentDetails.dates.allowSubmissionsFromDate.timestamp;
-            const matches = expTs && actTs ? Math.abs(expTs - actTs) < 60 : false;
-            checks.allowSubmissionsFromDateMatches = matches;
-            if (!matches) {
-              divergences.push(
-                `allowSubmissionsFromDate timestamp (${actTs}) diverge do esperado (${expTs})`
-              );
-            }
-          } else {
-            checks.allowSubmissionsFromDateMatches =
-              !currentDetails.dates.allowSubmissionsFromDate.enabled;
+          break;
+        }
+
+        case 'fileSubmissionEnabled': {
+          const expBool = Boolean(expected);
+          const actBool = currentDetails.submissionConfig.fileSubmissionEnabled;
+          const matches = actBool === expBool;
+          checks[checkPrefix] = matches;
+          if (!matches) {
+            divergences.push(
+              `fileSubmissionEnabled (${actBool}) diverge do esperado (${expBool})`
+            );
           }
-        } else if (key === 'fileSubmissionEnabled') {
-          const matches = currentDetails.submissionConfig.fileSubmissionEnabled === Boolean(expected);
-          checks.fileSubmissionEnabledMatches = matches;
-          if (!matches) divergences.push('fileSubmissionEnabled diverge');
-        } else if (key === 'maxFiles') {
-          const matches = currentDetails.submissionConfig.maxFiles === Number(expected);
-          checks.maxFilesMatches = matches;
-          if (!matches) divergences.push(`maxFiles (${currentDetails.submissionConfig.maxFiles}) diverge de ${expected}`);
-        } else if (key === 'fileTypes') {
+          break;
+        }
+
+        case 'maxFiles': {
+          const expNum = Number(expected);
+          const actNum = currentDetails.submissionConfig.maxFiles;
+          const matches = actNum === expNum;
+          checks[checkPrefix] = matches;
+          if (!matches) {
+            divergences.push(`maxFiles (${actNum}) diverge de ${expNum}`);
+          }
+          break;
+        }
+
+        case 'fileTypes': {
           const expNorm = String(expected || '').toLowerCase().replace(/\s+/g, '');
           const actNorm = String(currentDetails.submissionConfig.fileTypes || '').toLowerCase().replace(/\s+/g, '');
           const matches = expNorm === actNorm;
-          checks.fileTypesMatches = matches;
-          if (!matches) divergences.push(`fileTypes ("${actNorm}") diverge de "${expNorm}"`);
-        } else if (key === 'maxSizeBytes') {
-          const matches = currentDetails.submissionConfig.maxSizeBytes === Number(expected);
-          checks.maxSizeBytesMatches = matches;
-          if (!matches) divergences.push('maxSizeBytes diverge');
+          checks[checkPrefix] = matches;
+          if (!matches) {
+            divergences.push(`fileTypes ("${actNorm}") diverge de "${expNorm}"`);
+          }
+          break;
         }
+
+        case 'maxSizeBytes': {
+          const expNum = Number(expected);
+          const actNum = currentDetails.submissionConfig.maxSizeBytes;
+          const matches = actNum === expNum;
+          checks[checkPrefix] = matches;
+          if (!matches) {
+            divergences.push(`maxSizeBytes (${actNum}) diverge de ${expNum}`);
+          }
+          break;
+        }
+
+        case 'maxGrade':
+        case 'grade': {
+          const expNum = Number(expected);
+          const actNum = Number(currentDetails.settings.maxGrade);
+          const matches = actNum === expNum;
+          checks[checkPrefix] = matches;
+          if (!matches) {
+            divergences.push(`maxGrade (${actNum}) diverge de ${expNum}`);
+          }
+          break;
+        }
+
+        case 'teamSubmission':
+        case 'isTeamSubmission': {
+          const expBool = Boolean(expected);
+          const actBool = currentDetails.settings.teamSubmission;
+          const matches = actBool === expBool;
+          checks[checkPrefix] = matches;
+          if (!matches) {
+            divergences.push(`teamSubmission (${actBool}) diverge de ${expBool}`);
+          }
+          break;
+        }
+
+        case 'introAttachments':
+        case 'attachments': {
+          const actAttachments = currentDetails.intro.attachments || [];
+          let matches = false;
+          if (Array.isArray(expected)) {
+            matches = actAttachments.length === expected.length;
+          } else if (typeof expected === 'number') {
+            matches = actAttachments.length === expected;
+          } else {
+            matches = (actAttachments.length > 0) === Boolean(expected);
+          }
+          checks[checkPrefix] = matches;
+          if (!matches) {
+            divergences.push(
+              `introAttachments (${actAttachments.length} arquivos) diverge do esperado (${JSON.stringify(expected)})`
+            );
+          }
+          break;
+        }
+
+        default: {
+          if (key in currentDetails) {
+            const actVal = (currentDetails as any)[key];
+            const matches = actVal == expected;
+            checks[checkPrefix] = matches;
+            if (!matches) {
+              divergences.push(`Campo "${key}" (${actVal}) diverge do esperado (${expected})`);
+            }
+          } else {
+            checks[checkPrefix] = false;
+            divergences.push(`Chave de expectativa desconhecida ou não suportada para verificação: "${key}"`);
+          }
+          break;
+        }
+      }
+    };
+
+    // 1. Verify expectedChanges
+    if (params.expectedChanges) {
+      for (const [key, val] of Object.entries(params.expectedChanges)) {
+        verifyKey(key, val, false);
+      }
+    }
+
+    // 2. Verify expectedPreserved
+    if (params.expectedPreserved) {
+      for (const [key, val] of Object.entries(params.expectedPreserved)) {
+        verifyKey(key, val, true);
       }
     }
 
@@ -1451,7 +1813,7 @@ export class MoodleAssignmentManager {
     courseModuleId?: number;
   }): Promise<{ courseId: number; assignmentId?: number; courseModuleId?: number }> {
     if (params.assignmentId) {
-      const ctx = await this.client.resolveAssignmentContext(params.assignmentId, params.courseId);
+      const ctx = await this.client.resolveAssignmentContext(params.assignmentId, params.courseId, true);
       if (ctx) {
         if (params.courseId && ctx.courseId !== params.courseId) {
           throw new MoodleAssignmentError(
@@ -1487,8 +1849,11 @@ export class MoodleAssignmentManager {
     try {
       const dir = path.dirname(this.auditLogPath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      const secrets = [this.config.token, this.config.password, process.env.MCP_AUTH_TOKEN];
-      const raw = redactSecrets(JSON.stringify(entry), secrets);
+      const secrets = [this.config.token, this.config.password, process.env.MCP_AUTH_TOKEN].filter(Boolean) as string[];
+      let raw = JSON.stringify(entry);
+      raw = raw.replace(/sesskey=[a-zA-Z0-9_-]+/gi, 'sesskey=REDACTED');
+      raw = raw.replace(/MoodleSession=[a-zA-Z0-9_-]+/gi, 'MoodleSession=REDACTED');
+      raw = redactSecrets(raw, secrets);
       fs.appendFileSync(this.auditLogPath, raw + '\n', 'utf-8');
     } catch {
       // Audit write failures must not break the main operation

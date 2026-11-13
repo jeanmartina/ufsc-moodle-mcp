@@ -1,4 +1,4 @@
-# UFSC Moodle MCP Server (`ufsc-moodle-mcp` v1.4.0)
+# UFSC Moodle MCP Server (`ufsc-moodle-mcp` v1.4.1)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
@@ -6,6 +6,19 @@
 [![MCP](https://img.shields.io/badge/MCP-2.0-orange.svg)](https://modelcontextprotocol.io/)
 
 Servidor **Model Context Protocol (MCP)** em TypeScript desenvolvido para o **Moodle da UFSC** (`https://presencial.moodle.ufsc.br`), com suporte a **Streamable HTTP** (para integração direta com **ChatGPT**, **Codex**, **Claude**, **Orca/Antigravity** e agentes autônomos) e **Stdio**.
+
+## Novidades da Versão 1.4.1
+
+1. **Correção do Formulário Oficial do Moodle (`/course/modedit.php`):**
+   - **Parser de `<select>` Resiliente:** Extrai corretamente opções selecionadas (`<option value="..." selected>`), impedindo que campos de data (`day`, `month`, `year`) e tipo de nota (`grade[modgrade_type]`) recuassem para os valores padrão da primeira opção (como ano 1900 ou nota 'none').
+   - **Botão de Submissão Preciso:** Mapeia `submitbutton2` com valor `"Salvar e voltar ao curso"`, prevenindo cancelamento acidental ou descarte de alterações.
+   - **Mapeamento de Controles Repetidos:** Preenche tanto `assignsubmission_file_filetypes` quanto `assignsubmission_file_filetypes[filetypes]`, além de `alwaysshowdescription` e `showdescription`.
+   - **Diagnóstico Explícito de Resposta:** Distingue rejeição de formulário com erros de validação (`form_rejected`), expiração de sessão web com redirect para login (`session_expired`), erro fatal do Moodle (`moodle_api_error`), gravação não confirmada (`write_not_confirmed`) e divergência pós-escrita (`verification_failed`).
+2. **Validação e Verificação Independente (`verify_assignment_update`):**
+   - **Invalidação Proativa de Cache:** Invalida `assignmentIndexCache` antes da releitura pós-commit, garantindo estado 100% fresco do Moodle.
+   - **Normalização Rigorosa de Datas:** Suporta formatos de data público e normalizado com tolerância e validação prévia de tipo; nunca compara com `undefined`.
+   - **Avaliação de Campos Preservados:** Verifica individualmente tanto `expectedChanges` quanto `expectedPreserved` (nome, nota máxima, individual/grupo, anexos e prazos não modificados), rejeitando chaves desconhecidas com divergência explícita.
+   - **Preservação de Diagnóstico Estruturado:** Preenche `structuredContent` em todas as respostas de erro e sucesso, impedindo que conectores MCP de IA (como ChatGPT) remapeiem falhas de verificação para `INVALID_ARGUMENT`.
 
 ## Novidades da Versão 1.4.0
 

@@ -48,6 +48,10 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
   let currentTeamSubmission = 0; // individual
   let modeditPostCallCount = 0;
   let lastModeditPostBody = '';
+  let mockSimulateFormRejection = false;
+  let mockSimulateSessionExpired = false;
+  let mockSimulateUnconfirmedWrite = false;
+  let mockSimulateDivergenceOnSave = false;
 
   beforeAll(async () => {
     serverTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'moodle-assignment-test-'));
@@ -254,6 +258,12 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
       if (url.pathname === '/course/modedit.php' && req.method === 'GET') {
         const updateId = url.searchParams.get('update');
         if (updateId === '1569058') {
+          if (mockSimulateSessionExpired) {
+            res.writeHead(302, { Location: `${mockMoodleBaseUrl}/login/index.php` });
+            res.end();
+            return;
+          }
+
           const formHtml = `
             <!DOCTYPE html>
             <html>
@@ -261,6 +271,7 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
             <body>
               <form method="post" action="/course/modedit.php" id="mform1" class="mform" name="_qf__mod_assign_mod_form">
                 <input type="hidden" name="sesskey" value="MOCK_SESSKEY_12345" />
+                <input type="hidden" name="_qf__mod_assign_mod_form" value="1" />
                 <input type="hidden" name="update" value="1569058" />
                 <input type="hidden" name="course" value="49472" />
                 <input type="hidden" name="coursemodule" value="1569058" />
@@ -271,33 +282,41 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
                 <input type="hidden" name="introeditor[format]" value="${currentIntroFormat}" />
                 <input type="hidden" name="introeditor[itemid]" value="789012" />
 
+                <input type="hidden" name="alwaysshowdescription" value="0" />
                 <input type="checkbox" name="alwaysshowdescription" value="1" ${currentAlwaysShowDescription ? 'checked' : ''} />
-                
+                <input type="hidden" name="showdescription" value="0" />
+                <input type="checkbox" name="showdescription" value="1" ${currentAlwaysShowDescription ? 'checked' : ''} />
+
                 <input type="checkbox" name="duedate[enabled]" value="1" ${currentDueDate > 0 ? 'checked' : ''} />
-                <input type="text" name="duedate[day]" value="26" />
-                <input type="text" name="duedate[month]" value="11" />
-                <input type="text" name="duedate[year]" value="2026" />
-                <input type="text" name="duedate[hour]" value="23" />
-                <input type="text" name="duedate[minute]" value="59" />
+                <select name="duedate[day]"><option value="1">1</option><option value="26" selected >26</option></select>
+                <select name="duedate[month]"><option value="1">janeiro</option><option value="11" selected >novembro</option></select>
+                <select name="duedate[year]"><option value="1900">1900</option><option value="2026" selected >2026</option></select>
+                <select name="duedate[hour]"><option value="0">0</option><option value="23" selected >23</option></select>
+                <select name="duedate[minute]"><option value="0">0</option><option value="59" selected >59</option></select>
 
                 <input type="checkbox" name="cutoffdate[enabled]" value="1" ${currentCutoffDate > 0 ? 'checked' : ''} />
-                <input type="text" name="cutoffdate[day]" value="30" />
-                <input type="text" name="cutoffdate[month]" value="11" />
-                <input type="text" name="cutoffdate[year]" value="2026" />
-                <input type="text" name="cutoffdate[hour]" value="23" />
-                <input type="text" name="cutoffdate[minute]" value="59" />
+                <select name="cutoffdate[day]"><option value="1">1</option><option value="30" selected >30</option></select>
+                <select name="cutoffdate[month]"><option value="1">janeiro</option><option value="11" selected >novembro</option></select>
+                <select name="cutoffdate[year]"><option value="1900">1900</option><option value="2026" selected >2026</option></select>
+                <select name="cutoffdate[hour]"><option value="0">0</option><option value="23" selected >23</option></select>
+                <select name="cutoffdate[minute]"><option value="0">0</option><option value="59" selected >59</option></select>
 
                 <input type="checkbox" name="assignsubmission_file_enabled" value="1" ${currentFileSubmissionEnabled ? 'checked' : ''} />
-                <input type="text" name="assignsubmission_file_maxfiles" value="${currentMaxFiles}" />
+                <select name="assignsubmission_file_maxfiles"><option value="1">1</option><option value="2" selected >2</option></select>
+                <input type="text" name="assignsubmission_file_filetypes[filetypes]" value="${currentFileTypes}" />
                 <input type="text" name="assignsubmission_file_filetypes" value="${currentFileTypes}" />
                 <input type="text" name="assignsubmission_file_maxsizebytes" value="${currentMaxSizeBytes}" />
 
+                <select name="grade[modgrade_type]"><option value="none">Nenhum</option><option value="point" selected >Ponto</option></select>
+
                 <select name="visible">
-                  <option value="1" ${currentModuleVisible ? 'selected' : ''}>Show on course page</option>
-                  <option value="0" ${!currentModuleVisible ? 'selected' : ''}>Hide from students</option>
+                  <option value="1" ${currentModuleVisible ? 'selected' : ''}>Mostrar na página do curso</option>
+                  <option value="0" ${!currentModuleVisible ? 'selected' : ''}>Ocultar dos estudantes</option>
                 </select>
 
-                <input type="submit" name="submitbutton" value="Save and return to course" />
+                <input type="submit" name="submitbutton2" id="id_submitbutton2" value="Salvar e voltar ao curso" />
+                <input type="submit" name="submitbutton" id="id_submitbutton" value="Salvar e mostrar" />
+                <input type="submit" name="cancel" id="id_cancel" value="Cancelar" />
               </form>
             </body>
             </html>
@@ -317,11 +336,74 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
           lastModeditPostBody = body;
           const params = new URLSearchParams(body);
 
+          if (mockSimulateSessionExpired) {
+            res.writeHead(302, { Location: `${mockMoodleBaseUrl}/login/index.php` });
+            res.end();
+            return;
+          }
+
+          if (mockSimulateFormRejection) {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(`
+              <!DOCTYPE html><html><body>
+                <form id="mform1" class="mform">
+                  <input type="hidden" name="_qf__mod_assign_mod_form" value="1" />
+                  <div id="id_error_duedate" class="error">Data de vencimento não pode ser anterior à data de abertura.</div>
+                </form>
+              </body></html>
+            `);
+            return;
+          }
+
+          if (mockSimulateUnconfirmedWrite) {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end('<!DOCTYPE html><html><body>Página inesperada sem confirmação</body></html>');
+            return;
+          }
+
+          // Strict validation: Reject if dates were corrupted to default 1900!
+          if (params.get('duedate[year]') === '1900' || params.get('cutoffdate[year]') === '1900') {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(`
+              <!DOCTYPE html><html><body>
+                <form id="mform1" class="mform">
+                  <input type="hidden" name="_qf__mod_assign_mod_form" value="1" />
+                  <div id="id_error_duedate" class="error">Ano inválido: 1900</div>
+                </form>
+              </body></html>
+            `);
+            return;
+          }
+
+          // Strict validation: Must submit using submitbutton2 "Salvar e voltar ao curso" and NOT cancel
+          if (params.has('cancel')) {
+            // Cancelled: redirects without updating state!
+            res.writeHead(303, { Location: `${mockMoodleBaseUrl}/course/view.php?id=49472` });
+            res.end();
+            return;
+          }
+
+          if (params.get('submitbutton2') !== 'Salvar e voltar ao curso') {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(`
+              <!DOCTYPE html><html><body>
+                <form id="mform1" class="mform">
+                  <input type="hidden" name="_qf__mod_assign_mod_form" value="1" />
+                  <div id="id_error_submitbutton" class="error">Botão de envio inválido ou ausente</div>
+                </form>
+              </body></html>
+            `);
+            return;
+          }
+
           // Update mock state based on form parameters
           if (params.has('introeditor[text]')) {
             currentAssignmentIntro = params.get('introeditor[text]');
           }
-          if (params.has('visible')) {
+          if (mockSimulateDivergenceOnSave) {
+            // Divergence: simulate save reported OK to Moodle web session, but live state was reverted/not persisted
+            currentModuleVisible = false;
+          } else if (params.has('visible')) {
             currentModuleVisible = params.get('visible') === '1';
           }
           if (params.has('alwaysshowdescription')) {
@@ -334,11 +416,10 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
             const year = parseInt(params.get('duedate[year]') || '2026', 10);
             const hour = parseInt(params.get('duedate[hour]') || '23', 10);
             const minute = parseInt(params.get('duedate[minute]') || '59', 10);
-            // Construct timestamp in America/Sao_Paulo (UTC-3)
             const pad = (n: number) => String(n).padStart(2, '0');
             const iso = `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:00-03:00`;
             currentDueDate = parseAndFormatMoodleDate(iso).timestamp;
-          } else if (params.has('submitbutton') && !params.has('duedate[enabled]')) {
+          } else if (!params.has('duedate[enabled]')) {
             currentDueDate = 0;
           }
 
@@ -359,7 +440,9 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
           if (params.has('assignsubmission_file_maxfiles')) {
             currentMaxFiles = parseInt(params.get('assignsubmission_file_maxfiles') || '2', 10);
           }
-          if (params.has('assignsubmission_file_filetypes')) {
+          if (params.has('assignsubmission_file_filetypes[filetypes]')) {
+            currentFileTypes = params.get('assignsubmission_file_filetypes[filetypes]') || '';
+          } else if (params.has('assignsubmission_file_filetypes')) {
             currentFileTypes = params.get('assignsubmission_file_filetypes') || '';
           }
           if (params.has('assignsubmission_file_maxsizebytes')) {
@@ -375,6 +458,11 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
 
       // Mock login for MoodleWebSession
       if (url.pathname.startsWith('/login/index.php')) {
+        if (mockSimulateSessionExpired) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end('<!DOCTYPE html><html><body><form id="login" action="/login/index.php"><input name="username"></form></body></html>');
+          return;
+        }
         res.writeHead(302, {
           Location: `${mockMoodleBaseUrl}/my/`,
           'Set-Cookie': 'MoodleSession=mock_valid_session_assign_123; Path=/',
@@ -955,5 +1043,306 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
     expect(verifyData.currentDetails.submissionConfig.fileSubmissionEnabled).toBe(true);
     expect(verifyData.currentDetails.submissionConfig.maxFiles).toBe(2);
     expect(verifyData.currentDetails.submissionConfig.fileTypes).toBe('.pdf,.zip');
+  });
+
+  // Test 15: HTTP 200 com formulário e erros reporta erro explícito form_rejected
+  it('15. Formulário rejeitado com erros de validação reporta form_rejected', async () => {
+    const prepRes = await mcpClient.callTool({
+      name: 'prepare_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        patch: {
+          visible: true,
+        },
+      },
+    });
+    const plan = parseToolJson(prepRes);
+
+    mockSimulateFormRejection = true;
+    try {
+      const commitRes = await mcpClient.callTool({
+        name: 'commit_assignment_update',
+        arguments: {
+          planId: plan.planId,
+          planHash: plan.planHash,
+          confirmedByReviewer: true,
+        },
+      });
+
+      expect(commitRes.isError).toBe(true);
+      const err = parseToolJson(commitRes);
+      expect(err.errorCode).toBe('form_rejected');
+      expect(err.errorMessage).toContain('Data de vencimento não pode ser anterior');
+      // Verify structuredContent preserves errorCode
+      expect((commitRes as any).structuredContent?.errorCode).toBe('form_rejected');
+    } finally {
+      mockSimulateFormRejection = false;
+    }
+  });
+
+  // Test 16: Sessão expirada / redirecionamento para login reporta session_expired
+  it('16. Sessão web expirada durante escrita reporta session_expired', async () => {
+    const prepRes = await mcpClient.callTool({
+      name: 'prepare_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        patch: {
+          visible: true,
+        },
+      },
+    });
+    const plan = parseToolJson(prepRes);
+
+    mockSimulateSessionExpired = true;
+    try {
+      const commitRes = await mcpClient.callTool({
+        name: 'commit_assignment_update',
+        arguments: {
+          planId: plan.planId,
+          planHash: plan.planHash,
+          confirmedByReviewer: true,
+        },
+      });
+
+      expect(commitRes.isError).toBe(true);
+      const err = parseToolJson(commitRes);
+      expect(err.errorCode).toBe('session_expired');
+      expect(err.errorMessage).toContain('sessão autenticada do Moodle expirou');
+    } finally {
+      mockSimulateSessionExpired = false;
+    }
+  });
+
+  // Test 17: Gravação não confirmada (URL inesperada) reporta write_not_confirmed
+  it('17. Resposta HTTP inesperada sem confirmação reporta write_not_confirmed', async () => {
+    const prepRes = await mcpClient.callTool({
+      name: 'prepare_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        patch: {
+          visible: true,
+        },
+      },
+    });
+    const plan = parseToolJson(prepRes);
+
+    mockSimulateUnconfirmedWrite = true;
+    try {
+      const commitRes = await mcpClient.callTool({
+        name: 'commit_assignment_update',
+        arguments: {
+          planId: plan.planId,
+          planHash: plan.planHash,
+          confirmedByReviewer: true,
+        },
+      });
+
+      expect(commitRes.isError).toBe(true);
+      const err = parseToolJson(commitRes);
+      expect(err.errorCode).toBe('write_not_confirmed');
+      expect(err.errorMessage).toContain('não confirmando o salvamento');
+    } finally {
+      mockSimulateUnconfirmedWrite = false;
+    }
+  });
+
+  // Test 18: verify_assignment_update com datas em formato público e normalizado
+  it('18. verify_assignment_update suporta formato público e normalizado sem undefined e rejeita formato inválido', async () => {
+    // 18.1 Public patch format (enabled, date, timeZone)
+    const verifyPublic = await mcpClient.callTool({
+      name: 'verify_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        expectedChanges: {
+          dueDate: {
+            enabled: true,
+            date: '2026-11-26T23:59:00-03:00',
+            timeZone: 'America/Sao_Paulo',
+          },
+        },
+      },
+    });
+    expect(verifyPublic.isError).toBeFalsy();
+    const dataPublic = parseToolJson(verifyPublic);
+    expect(dataPublic.checks.dueDateMatches).toBe(true);
+    expect(dataPublic.verified).toBe(true);
+
+    // 18.2 Normalized format (enabled, timestamp)
+    const verifyNorm = await mcpClient.callTool({
+      name: 'verify_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        expectedChanges: {
+          dueDate: {
+            enabled: true,
+            timestamp: 1795748340,
+          },
+        },
+      },
+    });
+    expect(verifyNorm.isError).toBeFalsy();
+    const dataNorm = parseToolJson(verifyNorm);
+    expect(dataNorm.checks.dueDateMatches).toBe(true);
+    expect(dataNorm.verified).toBe(true);
+
+    // 18.3 Invalid date format rejection (enabled: true with no date/timestamp)
+    const verifyInvalid = await mcpClient.callTool({
+      name: 'verify_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        expectedChanges: {
+          dueDate: {
+            enabled: true,
+          },
+        },
+      },
+    });
+    expect(verifyInvalid.isError).toBe(true);
+    const errData = parseToolJson(verifyInvalid);
+    expect(errData.errorCode).toBe('invalid_argument');
+  });
+
+  // Test 19: verify_assignment_update avalia expectedPreserved e detecta chave desconhecida
+  it('19. verify_assignment_update avalia expectedPreserved e reporta chave desconhecida', async () => {
+    // 19.1 Successful expectedPreserved check
+    const verifyPreserved = await mcpClient.callTool({
+      name: 'verify_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        expectedPreserved: {
+          name: 'Trabalho Prático Individual — Implementação e Análise Crítica de Pipeline DevSecOps',
+          maxGrade: 10,
+          teamSubmission: false,
+          cutoffDate: {
+            enabled: true,
+            timestamp: currentCutoffDate,
+          },
+          introAttachments: 1,
+        },
+      },
+    });
+    expect(verifyPreserved.isError).toBeFalsy();
+    const dataPreserved = parseToolJson(verifyPreserved);
+    expect(dataPreserved.checks.namePreserved).toBe(true);
+    expect(dataPreserved.checks.maxGradePreserved).toBe(true);
+    expect(dataPreserved.checks.teamSubmissionPreserved).toBe(true);
+    expect(dataPreserved.checks.cutoffDatePreserved).toBe(true);
+    expect(dataPreserved.checks.introAttachmentsPreserved).toBe(true);
+    expect(dataPreserved.verified).toBe(true);
+
+    // 19.2 Divergence in preserved field
+    const verifyDiverge = await mcpClient.callTool({
+      name: 'verify_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        expectedPreserved: {
+          maxGrade: 100, // actual is 10
+        },
+      },
+    });
+    expect(verifyDiverge.isError).toBeFalsy();
+    const dataDiverge = parseToolJson(verifyDiverge);
+    expect(dataDiverge.checks.maxGradePreserved).toBe(false);
+    expect(dataDiverge.verified).toBe(false);
+    expect(dataDiverge.divergences?.some((d: string) => d.includes('maxGrade'))).toBe(true);
+
+    // 19.3 Unknown key in expectedChanges
+    const verifyUnknown = await mcpClient.callTool({
+      name: 'verify_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        expectedChanges: {
+          unknownFieldXYZ: 'some_value',
+        },
+      },
+    });
+    expect(verifyUnknown.isError).toBeFalsy();
+    const dataUnknown = parseToolJson(verifyUnknown);
+    expect(dataUnknown.checks.unknownFieldXYZMatches).toBe(false);
+    expect(dataUnknown.verified).toBe(false);
+    expect(dataUnknown.divergences?.some((d: string) => d.includes('Chave de expectativa desconhecida'))).toBe(true);
+  });
+
+  // Test 20: Preservação de diagnóstico e structuredContent contra fallback genérico
+  it('20. Coerência entre erro textual e structuredContent preserva detalhes sem remapear', async () => {
+    currentModuleVisible = false; // ensure start state is false so proposing visible: true generates a diff
+    const prepRes = await mcpClient.callTool({
+      name: 'prepare_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        patch: {
+          visible: true,
+        },
+      },
+    });
+    const plan = parseToolJson(prepRes);
+
+    // Simulate divergence during commit verification: POST will succeed, but visible won't be persisted
+    mockSimulateDivergenceOnSave = true;
+    try {
+      const commitRes = await mcpClient.callTool({
+        name: 'commit_assignment_update',
+        arguments: {
+          planId: plan.planId,
+          planHash: plan.planHash,
+          confirmedByReviewer: true,
+        },
+      });
+
+      expect(commitRes.isError).toBe(true);
+      const textData = parseToolJson(commitRes);
+      expect(textData.errorCode).toBe('verification_failed');
+      expect(textData.errorMessage).toContain('verificação pós-atualização detectou divergências');
+
+      // Crucial: structuredContent must NOT be lost or generic INVALID_ARGUMENT!
+      const structured = (commitRes as any).structuredContent;
+      expect(structured).toBeDefined();
+      expect(structured.errorCode).toBe('verification_failed');
+      expect(structured.verification).toBeDefined();
+    } finally {
+      mockSimulateDivergenceOnSave = false;
+    }
+  });
+
+  // Test 21: Sanitização da trilha de auditoria
+  it('21. Trilha de auditoria sanitiza tokens, senhas, sesskeys e cookies de sessão', async () => {
+    const prepRes = await mcpClient.callTool({
+      name: 'prepare_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        patch: {
+          visible: true,
+        },
+      },
+    });
+    const plan = parseToolJson(prepRes);
+
+    await mcpClient.callTool({
+      name: 'commit_assignment_update',
+      arguments: {
+        planId: plan.planId,
+        planHash: plan.planHash,
+        confirmedByReviewer: true,
+        operationId: 'audit_sanitize_test_op_1',
+      },
+    });
+
+    expect(fs.existsSync(auditLogPath)).toBe(true);
+    const auditContent = fs.readFileSync(auditLogPath, 'utf-8');
+    expect(auditContent).not.toContain(SECRET_MOODLE_TOKEN);
+    expect(auditContent).not.toContain('ProfPassword123');
+    expect(auditContent).not.toContain('MOCK_SESSKEY_12345');
+    expect(auditContent).not.toContain('mock_valid_session_assign_123');
   });
 });
