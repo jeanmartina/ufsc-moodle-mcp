@@ -23,6 +23,7 @@ export type AssignmentErrorCode =
   | 'session_expired'
   | 'form_rejected'
   | 'write_not_confirmed'
+  | 'response_unclassified'
   | 'moodle_api_error'
   | 'verification_failed'
   | 'idempotent_replay';
@@ -493,6 +494,494 @@ export function normalizeExpectedDate(
   );
 }
 
+/**
+ * Decodes standard HTML entities commonly found in Moodle form values.
+ */
+export function decodeHtmlEntities(str: string): string {
+  if (!str) return '';
+  return str
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;|&#039;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&amp;/g, '&');
+}
+
+export interface ParsedAssignmentEditForm {
+  action: string;
+  method: string;
+  fields: URLSearchParams;
+  saveButton: { name: string; value: string };
+  rawFormHtml: string;
+}
+
+/**
+ * Scopes to the official Moodle assignment editing form (_qf__mod_assign_mod_form),
+ * validates action and method, respects disabled attributes, and serializes only its controls.
+ */
+export function parseAssignmentEditForm(html: string): ParsedAssignmentEditForm {
+  const formRegex = /<form\b([^>]*)>([\s\S]*?)<\/form>/gi;
+  let assignFormTag: string | null = null;
+  let assignFormBody: string | null = null;
+  let m: RegExpExecArray | null;
+
+  while ((m = formRegex.exec(html)) !== null) {
+    if (m[2].includes('_qf__mod_assign_mod_form')) {
+      assignFormTag = m[1];
+      assignFormBody = m[2];
+      break;
+    }
+  }
+
+  if (!assignFormBody || !assignFormTag) {
+    throw new MoodleAssignmentError(
+      'moodle_api_error',
+      'Formulário oficial de edição da tarefa (_qf__mod_assign_mod_form) não foi localizado no HTML retornado pelo Moodle.'
+    );
+  }
+
+  const actionMatch = assignFormTag.match(/\baction=["']([^"']*)["']/i);
+  const rawAction = actionMatch ? actionMatch[1].trim() : 'modedit.php';
+  const action = rawAction.startsWith('/')
+    ? rawAction
+    : `/course/${rawAction.replace(/^\/+/, '')}`;
+
+  const methodMatch = assignFormTag.match(/\bmethod=["']([^"']*)["']/i);
+  const method = methodMatch ? methodMatch[1].toUpperCase() : 'POST';
+
+  const fields = new URLSearchParams();
+  let saveButton: { name: string; value: string } | null = null;
+
+  const controlRegex = /<(input|select|textarea)\b([^>]*)>/gi;
+  while ((m = controlRegex.exec(assignFormBody)) !== null) {
+    const tagType = m[1].toLowerCase();
+    const attrs = m[2];
+
+    // Controls with disabled attribute are not successful controls in HTML forms
+    if (/\bdisabled\b/i.test(attrs)) continue;
+
+    const nameMatch = attrs.match(/\bname=["']([^"']+)["']/i) || attrs.match(/\bname=([^\s>]+)/i);
+    if (!nameMatch) continue;
+    const name = nameMatch[1];
+
+    if (tagType === 'input') {
+      const typeMatch = attrs.match(/\btype=["']([^"']+)["']/i) || attrs.match(/\btype=([^\s>]+)/i);
+      const inputType = (typeMatch ? typeMatch[1] : 'text').toLowerCase();
+      const valMatch = attrs.match(/\bvalue=["']([^"']*)["']/i);
+      const rawVal = valMatch ? valMatch[1] : '';
+      const val = decodeHtmlEntities(rawVal);
+
+      if (inputType === 'submit' || inputType === 'button' || inputType === 'image') {
+        if (name === 'submitbutton2' || /salvar.*voltar/i.test(val)) {
+          saveButton = { name, value: val || 'Salvar e voltar ao curso' };
+        }
+        continue;
+      }
+
+      if (inputType === 'checkbox' || inputType === 'radio') {
+        if (/\bchecked\b/i.test(attrs)) {
+          fields.set(name, val || '1');
+        }
+        // Unchecked checkboxes do NOT submit, but preserve any preceding hidden input with same name
+      } else {
+        fields.set(name, val);
+      }
+    } else if (tagType === 'select') {
+      const selectEnd = assignFormBody.indexOf('</select>', controlRegex.lastIndex);
+      const selectBody = selectEnd !== -1 ? assignFormBody.slice(controlRegex.lastIndex, selectEnd) : '';
+      const val = parseSelectValue(selectBody);
+      if (val !== null) {
+        fields.set(name, decodeHtmlEntities(val));
+      }
+      if (selectEnd !== -1) {
+        controlRegex.lastIndex = selectEnd + 9;
+      }
+    } else if (tagType === 'textarea') {
+      const textEnd = assignFormBody.indexOf('</textarea>', controlRegex.lastIndex);
+      const textBody = textEnd !== -1 ? assignFormBody.slice(controlRegex.lastIndex, textEnd) : '';
+      fields.set(name, decodeHtmlEntities(textBody));
+      if (textEnd !== -1) {
+        controlRegex.lastIndex = textEnd + 11;
+      }
+    }
+  }
+
+  return {
+    action,
+    method,
+    fields,
+    saveButton: saveButton || { name: 'submitbutton2', value: 'Salvar e voltar ao curso' },
+    rawFormHtml: assignFormBody,
+  };
+}
+
+export interface StructuralMoodleDiagnostics {
+  pageTitle: string;
+  sanitizedUrl: string;
+  fieldErrors: string[];
+  nativeError: string | null;
+  errorBoxSnippet: string | null;
+  isLoginForm: boolean;
+  isFormReRendered: boolean;
+  isConfirmedRedirect: boolean;
+  triggerMarker: string | null;
+}
+
+export function extractStructuralMoodleDiagnostics(
+  html: string,
+  url: string,
+  status: number
+): StructuralMoodleDiagnostics {
+  const sanitizedUrl = url.replace(/([?&])(token|sesskey|wstoken|password)=[^&]*/gi, '$1$2=REDACTED');
+  const titleMatch = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  const pageTitle = titleMatch ? htmlToText(titleMatch[1]).trim() : '';
+
+  // 1. Login or Authentication redirect detection
+  const isLoginForm =
+    url.includes('/login/') ||
+    url.includes('sistemas.ufsc.br') ||
+    /<form[^>]*id=["']fm1["']/i.test(html) ||
+    /<form[^>]*id=["']login["']/i.test(html) ||
+    /name=["']logintoken["']/i.test(html);
+
+  // 2. Re-rendered assignment edit form
+  const isFormReRendered =
+    /<input[^>]+name=["']_qf__mod_assign_mod_form["']/i.test(html) ||
+    /<form[^>]+id=["']mform1[^"']*["']/i.test(html);
+
+  // 3. Confirmed view redirect
+  const isConfirmedRedirect =
+    url.includes('/course/view.php') || url.includes('/mod/assign/view.php');
+
+  // 4. Field validation errors (extracted only when inner text is non-empty)
+  const fieldErrors: string[] = [];
+  const fieldErrorRegex =
+    /<(?:div|span|p)[^>]*(?:id=["']id_error_[^"']+["']|class=["'][^"']*(?:invalid-feedback|errormessage|form-error)[^"']*["'])[^>]*>([\s\S]*?)<\/(?:div|span|p)>/gi;
+  let feMatch: RegExpExecArray | null;
+  while ((feMatch = fieldErrorRegex.exec(html)) !== null) {
+    const txt = htmlToText(feMatch[1]).trim();
+    if (txt && !fieldErrors.includes(txt)) {
+      fieldErrors.push(txt);
+    }
+  }
+
+  // 5. Native error containers (modal, errorbox, notice, alert-danger, moodle-exception)
+  let nativeError: string | null = null;
+  let errorBoxSnippet: string | null = null;
+  let triggerMarker: string | null = null;
+
+  const containerRegexes: Array<{ marker: string; regex: RegExp }> = [
+    { marker: 'moodle_exception', regex: /<div[^>]*class=["'][^"']*moodle-exception[^"']*["'][^>]*>([\s\S]*?)<\/div>/i },
+    { marker: 'alert-danger', regex: /<div[^>]*class=["'][^"']*alert-danger[^"']*["'][^>]*>([\s\S]*?)<\/div>/i },
+    { marker: 'notice_box', regex: /<div[^>]*id=["']notice["'][^>]*>([\s\S]*?)<\/div>/i },
+    { marker: 'errorbox', regex: /<div[^>]*class=["'][^"']*errorbox[^"']*["'][^>]*>([\s\S]*?)<\/div>/i },
+    { marker: 'notifyproblem', regex: /<div[^>]*class=["'][^"']*(?:notifyproblem|errormessage)[^"']*["'][^>]*>([\s\S]*?)<\/div>/i },
+    { marker: 'fatalerror_rel', regex: /<[^>]+data-rel=["']fatalerror["'][^>]*>([\s\S]*?)<\/[a-z0-9]+>/i },
+  ];
+
+  for (const item of containerRegexes) {
+    const cMatch = html.match(item.regex);
+    if (cMatch) {
+      const txt = htmlToText(cMatch[1]).trim();
+      if (txt) {
+        nativeError = txt;
+        errorBoxSnippet = txt.slice(0, 300);
+        triggerMarker = item.marker;
+        break;
+      }
+    }
+  }
+
+  // Check for specific session key expiration in text
+  if (!isLoginForm && /invalidsesskey/i.test(html)) {
+    triggerMarker = triggerMarker || 'invalidsesskey';
+    nativeError = nativeError || 'Chave de sessão inválida (invalidsesskey). A sessão do Moodle expirou.';
+  }
+
+  return {
+    pageTitle,
+    sanitizedUrl,
+    fieldErrors,
+    nativeError,
+    errorBoxSnippet,
+    isLoginForm,
+    isFormReRendered,
+    isConfirmedRedirect,
+    triggerMarker,
+  };
+}
+
+export interface AssignmentFieldContractEntry<T = any> {
+  key: string;
+  category: 'core' | 'intro' | 'visibility' | 'dates' | 'submissionConfig' | 'settings';
+  getValue: (details: AssignmentDetailsResult) => T;
+  compare: (
+    actualVal: T,
+    expectedVal: any,
+    defaultTimeZone: string
+  ) => { matches: boolean; message?: string };
+}
+
+function compareDateDetails(
+  fieldName: string,
+  act: AssignmentDateDetails,
+  exp: any,
+  defaultTimeZone: string
+): { matches: boolean; message?: string } {
+  const normExp = normalizeExpectedDate(exp, defaultTimeZone);
+  if (!act) {
+    return { matches: false, message: `Campo de data "${fieldName}" não encontrado nos detalhes da tarefa` };
+  }
+  if (normExp.enabled) {
+    if (!act.enabled) {
+      return { matches: false, message: `${fieldName} deveria estar habilitado mas está desabilitado no Moodle` };
+    }
+    const expTs = normExp.timestamp;
+    const actTs = act.timestamp;
+    if (expTs !== undefined && actTs !== null && actTs !== undefined) {
+      const diff = Math.abs(expTs - actTs);
+      if (diff > 60) {
+        return {
+          matches: false,
+          message: `${fieldName} timestamp (${actTs}) diverge do esperado (${expTs}, diferença: ${diff}s)`,
+        };
+      }
+    }
+    return { matches: true };
+  } else {
+    const matches = !act.enabled;
+    return {
+      matches,
+      message: matches ? undefined : `${fieldName} deveria estar desabilitado mas permaneceu ativo (${act.timestamp})`,
+    };
+  }
+}
+
+export const ASSIGNMENT_FIELD_CONTRACT: Record<string, AssignmentFieldContractEntry> = {
+  name: {
+    key: 'name',
+    category: 'core',
+    getValue: (d) => d.name,
+    compare: (act, exp) => {
+      const actNorm = String(act ?? '').trim();
+      const expNorm = String(exp ?? '').trim();
+      const matches = actNorm === expNorm;
+      return { matches, message: matches ? undefined : `Nome ("${actNorm}") diverge do esperado ("${expNorm}")` };
+    },
+  },
+  courseModuleId: {
+    key: 'courseModuleId',
+    category: 'core',
+    getValue: (d) => d.courseModuleId,
+    compare: (act, exp) => {
+      const matches = Number(act) === Number(exp);
+      return { matches, message: matches ? undefined : `courseModuleId (${act}) diverge de ${exp}` };
+    },
+  },
+  assignmentId: {
+    key: 'assignmentId',
+    category: 'core',
+    getValue: (d) => d.assignmentId,
+    compare: (act, exp) => {
+      const matches = Number(act) === Number(exp);
+      return { matches, message: matches ? undefined : `assignmentId (${act}) diverge de ${exp}` };
+    },
+  },
+  visible: {
+    key: 'visible',
+    category: 'visibility',
+    getValue: (d) => d.visibility.moduleVisible,
+    compare: (act, exp) => {
+      const expBool = Boolean(exp);
+      const actBool = Boolean(act);
+      const matches = actBool === expBool;
+      return { matches, message: matches ? undefined : `Visibilidade (${actBool}) diverge do esperado (${expBool})` };
+    },
+  },
+  alwaysShowDescription: {
+    key: 'alwaysShowDescription',
+    category: 'dates',
+    getValue: (d) => d.dates.alwaysShowDescription,
+    compare: (act, exp) => {
+      const expBool = Boolean(exp);
+      const actBool = Boolean(act);
+      const matches = actBool === expBool;
+      return { matches, message: matches ? undefined : `alwaysShowDescription (${actBool}) diverge do esperado (${expBool})` };
+    },
+  },
+  intro: {
+    key: 'intro',
+    category: 'intro',
+    getValue: (d) => d.intro.html,
+    compare: (act, exp) => {
+      if (exp === null || exp === undefined || exp === '') {
+        const matches = !act || act.trim() === '';
+        return { matches, message: matches ? undefined : 'Enunciado deveria estar vazio mas contém conteúdo' };
+      }
+      const expNorm = String(exp).trim();
+      const actNorm = String(act || '').trim();
+      if (!actNorm) {
+        return { matches: false, message: 'Enunciado está vazio no Moodle, mas era esperado conteúdo não-vazio' };
+      }
+      const matches =
+        expNorm === actNorm ||
+        htmlToText(expNorm).trim() === htmlToText(actNorm).trim() ||
+        expNorm.replace(/\s+/g, ' ') === actNorm.replace(/\s+/g, ' ');
+      return { matches, message: matches ? undefined : 'Enunciado diverge do texto esperado' };
+    },
+  },
+  allowSubmissionsFromDate: {
+    key: 'allowSubmissionsFromDate',
+    category: 'dates',
+    getValue: (d) => d.dates.allowSubmissionsFromDate,
+    compare: (act, exp, tz) => compareDateDetails('allowSubmissionsFromDate', act, exp, tz),
+  },
+  dueDate: {
+    key: 'dueDate',
+    category: 'dates',
+    getValue: (d) => d.dates.dueDate,
+    compare: (act, exp, tz) => compareDateDetails('dueDate', act, exp, tz),
+  },
+  cutoffDate: {
+    key: 'cutoffDate',
+    category: 'dates',
+    getValue: (d) => d.dates.cutoffDate,
+    compare: (act, exp, tz) => compareDateDetails('cutoffDate', act, exp, tz),
+  },
+  gradingDueDate: {
+    key: 'gradingDueDate',
+    category: 'dates',
+    getValue: (d) => d.dates.gradingDueDate,
+    compare: (act, exp, tz) => compareDateDetails('gradingDueDate', act, exp, tz),
+  },
+  fileSubmissionEnabled: {
+    key: 'fileSubmissionEnabled',
+    category: 'submissionConfig',
+    getValue: (d) => d.submissionConfig.fileSubmissionEnabled,
+    compare: (act, exp) => {
+      const expBool = Boolean(exp);
+      const actBool = Boolean(act);
+      const matches = actBool === expBool;
+      return { matches, message: matches ? undefined : `fileSubmissionEnabled (${actBool}) diverge de ${expBool}` };
+    },
+  },
+  maxFiles: {
+    key: 'maxFiles',
+    category: 'submissionConfig',
+    getValue: (d) => d.submissionConfig.maxFiles,
+    compare: (act, exp) => {
+      const matches = Number(act) === Number(exp);
+      return { matches, message: matches ? undefined : `maxFiles (${act}) diverge de ${exp}` };
+    },
+  },
+  fileTypes: {
+    key: 'fileTypes',
+    category: 'submissionConfig',
+    getValue: (d) => d.submissionConfig.fileTypes,
+    compare: (act, exp) => {
+      const actNorm = String(act || '').toLowerCase().replace(/\s+/g, '');
+      const expNorm = String(exp || '').toLowerCase().replace(/\s+/g, '');
+      const matches = actNorm === expNorm;
+      return { matches, message: matches ? undefined : `fileTypes ("${actNorm}") diverge de "${expNorm}"` };
+    },
+  },
+  maxSizeBytes: {
+    key: 'maxSizeBytes',
+    category: 'submissionConfig',
+    getValue: (d) => d.submissionConfig.maxSizeBytes,
+    compare: (act, exp) => {
+      const matches = Number(act) === Number(exp);
+      return { matches, message: matches ? undefined : `maxSizeBytes (${act}) diverge de ${exp}` };
+    },
+  },
+  onlineTextEnabled: {
+    key: 'onlineTextEnabled',
+    category: 'submissionConfig',
+    getValue: (d) => d.submissionConfig.onlineTextEnabled,
+    compare: (act, exp) => {
+      const expBool = Boolean(exp);
+      const actBool = Boolean(act);
+      const matches = actBool === expBool;
+      return { matches, message: matches ? undefined : `onlineTextEnabled (${actBool}) diverge de ${expBool}` };
+    },
+  },
+  commentsEnabled: {
+    key: 'commentsEnabled',
+    category: 'submissionConfig',
+    getValue: (d) => d.submissionConfig.commentsEnabled,
+    compare: (act, exp) => {
+      const expBool = Boolean(exp);
+      const actBool = Boolean(act);
+      const matches = actBool === expBool;
+      return { matches, message: matches ? undefined : `commentsEnabled (${actBool}) diverge de ${expBool}` };
+    },
+  },
+  maxGrade: {
+    key: 'maxGrade',
+    category: 'settings',
+    getValue: (d) => d.settings.maxGrade,
+    compare: (act, exp) => {
+      const matches = Number(act) === Number(exp);
+      return { matches, message: matches ? undefined : `maxGrade (${act}) diverge de ${exp}` };
+    },
+  },
+  teamSubmission: {
+    key: 'teamSubmission',
+    category: 'settings',
+    getValue: (d) => d.settings.teamSubmission,
+    compare: (act, exp) => {
+      const expBool = Boolean(exp);
+      const actBool = Boolean(act);
+      const matches = actBool === expBool;
+      return { matches, message: matches ? undefined : `teamSubmission (${actBool}) diverge de ${expBool}` };
+    },
+  },
+  introAttachments: {
+    key: 'introAttachments',
+    category: 'intro',
+    getValue: (d) => d.intro.attachments,
+    compare: (act: any[], exp) => {
+      const actualList = Array.isArray(act) ? act : [];
+      if (Array.isArray(exp)) {
+        if (actualList.length !== exp.length) {
+          return {
+            matches: false,
+            message: `introAttachments: contagem de arquivos (${actualList.length}) diverge do esperado (${exp.length})`,
+          };
+        }
+        for (const expItem of exp) {
+          const expName = String(expItem.filename || expItem.name || '');
+          const found = actualList.find((a) => a.filename === expName);
+          if (!found) {
+            return {
+              matches: false,
+              message: `introAttachments: anexo esperado "${expName}" não encontrado na lista atual`,
+            };
+          }
+          if (typeof expItem.filesize === 'number' && expItem.filesize > 0) {
+            if (found.filesize !== expItem.filesize) {
+              return {
+                matches: false,
+                message: `introAttachments: tamanho do anexo "${expName}" (${found.filesize} bytes) diverge do esperado (${expItem.filesize} bytes)`,
+              };
+            }
+          }
+        }
+        return { matches: true };
+      }
+      if (typeof exp === 'number') {
+        const matches = actualList.length === exp;
+        return { matches, message: matches ? undefined : `introAttachments contagem (${actualList.length}) diverge de ${exp}` };
+      }
+      const matches = (actualList.length > 0) === Boolean(exp);
+      return { matches, message: matches ? undefined : `introAttachments presença (${actualList.length > 0}) diverge de ${Boolean(exp)}` };
+    },
+  },
+};
+
 export interface MoodleAssignmentManagerOptions {
   client: MoodleClient;
   config: MoodleConfig;
@@ -517,7 +1006,9 @@ export function getOrCreateAssignmentManager(
     });
     const auditLogPath =
       process.env.ASSIGNMENT_AUDIT_LOG_PATH ||
-      path.join(process.cwd(), 'config', 'assignment-audit.jsonl');
+      (fs.existsSync('/config')
+        ? '/config/assignment-audit.jsonl'
+        : path.join(process.cwd(), 'config', 'assignment-audit.jsonl'));
     mgr = new MoodleAssignmentManager({
       client,
       config: cfg,
@@ -1107,17 +1598,12 @@ export class MoodleAssignmentManager {
       checkPreserve('maxSizeBytes', true);
     }
 
-    // Always preserved settings:
-    unchangedFields.push(
-      'name',
-      'courseModuleId',
-      'assignmentId',
-      'maxGrade',
-      'teamSubmission',
-      'onlineTextEnabled',
-      'commentsEnabled',
-      'introAttachments'
-    );
+    // Ensure all contract fields that are not in proposedDiff are included in unchangedFields
+    for (const contractKey of Object.keys(ASSIGNMENT_FIELD_CONTRACT)) {
+      if (!(contractKey in proposedDiff) && !unchangedFields.includes(contractKey)) {
+        unchangedFields.push(contractKey);
+      }
+    }
 
     sideEffectsAndWarnings.push('O MCP não dispara avisos ou notificações automáticas aos alunos.');
 
@@ -1274,62 +1760,34 @@ export class MoodleAssignmentManager {
         throw err;
       }
 
-      if (
-        editPage.url.includes('/login/') ||
-        editPage.url.includes('sistemas.ufsc.br') ||
-        /<form[^>]*id=["']fm1["']/i.test(editPage.html) ||
-        /<form[^>]*id=["']login["']/i.test(editPage.html)
-      ) {
+      const initialDiag = extractStructuralMoodleDiagnostics(
+        editPage.html,
+        editPage.url,
+        editPage.status
+      );
+
+      if (initialDiag.isLoginForm) {
         throw new MoodleAssignmentError(
           'session_expired',
           'A sessão autenticada do Moodle expirou ao carregar o formulário de edição da tarefa (redirecionado para tela de login).'
         );
       }
 
-      if (editPage.status !== 200 || !/name=["']_qf__mod_assign_mod_form["']/i.test(editPage.html)) {
-        const errs = extractMoodleFormErrors(editPage.html);
+      if (editPage.status !== 200 || !initialDiag.isFormReRendered) {
         throw new MoodleAssignmentError(
           'moodle_api_error',
           `Não foi possível abrir o formulário de edição da tarefa (/course/modedit.php?update=${plan.courseModuleId}): ${
-            errs.join('; ') || 'falha de acesso ou permissão negada no Moodle'
-          }.`
+            initialDiag.nativeError || initialDiag.pageTitle || 'falha de acesso ou permissão negada no Moodle'
+          }.`,
+          { diagnostics: initialDiag }
         );
       }
 
-      // 9. Parse Existing Form Fields to Preserve ALL Unmodified Settings
-      const formFields = new URLSearchParams();
-      for (const tag of editPage.html.matchAll(/<input[^>]+>/gi)) {
-        const name = tag[0].match(/name=["']([^"']+)["']/i)?.[1];
-        const val = tag[0].match(/value=["']([^"']*)["']/i)?.[1] ?? '';
-        const type = tag[0].match(/type=["']([^"']+)["']/i)?.[1]?.toLowerCase() || 'text';
-        if (!name) continue;
+      // 9. Parse Form Controls Scoped Strictly to Assignment Form
+      const parsedForm = parseAssignmentEditForm(editPage.html);
+      const formFields = parsedForm.fields;
 
-        if (type === 'checkbox' || type === 'radio') {
-          if (/\bchecked\b/i.test(tag[0])) {
-            formFields.set(name, val || '1');
-          }
-        } else if (type !== 'submit' && type !== 'button' && type !== 'image') {
-          formFields.set(name, val);
-        }
-      }
-
-      for (const tag of editPage.html.matchAll(
-        /<select[^>]*name=["']([^"']+)["'][^>]*>([\s\S]*?)<\/select>/gi
-      )) {
-        const name = tag[1];
-        const selectedVal = parseSelectValue(tag[2]);
-        if (selectedVal !== null) {
-          formFields.set(name, selectedVal);
-        }
-      }
-
-      for (const tag of editPage.html.matchAll(
-        /<textarea[^>]*name=["']([^"']+)["'][^>]*>([\s\S]*?)<\/textarea>/gi
-      )) {
-        formFields.set(tag[1], tag[2]);
-      }
-
-      // 10. Apply the Approved Patch to Form Fields
+      // 10. Apply Approved Patch to Form Fields
       const patch = plan.patch;
 
       // Intro statement
@@ -1343,10 +1801,9 @@ export class MoodleAssignmentManager {
         formFields.set('visible', patch.visible ? '1' : '0');
       }
 
-      // Always show description
+      // Always show description (ONLY alters alwaysshowdescription, preserves showdescription)
       if (patch.alwaysShowDescription !== undefined) {
         formFields.set('alwaysshowdescription', patch.alwaysShowDescription ? '1' : '0');
-        formFields.set('showdescription', patch.alwaysShowDescription ? '1' : '0');
       }
 
       // Date helper
@@ -1387,8 +1844,9 @@ export class MoodleAssignmentManager {
         formFields.set('assignsubmission_file_maxfiles', String(patch.maxFiles));
       }
 
+      // Send ONLY assignsubmission_file_filetypes[filetypes] without scalar collision
       if (patch.fileTypes !== undefined) {
-        formFields.set('assignsubmission_file_filetypes', patch.fileTypes);
+        formFields.delete('assignsubmission_file_filetypes');
         formFields.set('assignsubmission_file_filetypes[filetypes]', patch.fileTypes);
       }
 
@@ -1396,16 +1854,19 @@ export class MoodleAssignmentManager {
         formFields.set('assignsubmission_file_maxsizebytes', String(patch.maxSizeBytes));
       }
 
-      // Submit button: Set submitbutton2 ("Salvar e voltar ao curso") and never cancel
+      // Submit button: Set saveButton (submitbutton2) and NEVER cancel
       formFields.delete('cancel');
       formFields.delete('submitbutton');
-      formFields.set('submitbutton2', 'Salvar e voltar ao curso');
+      formFields.set(parsedForm.saveButton.name, parsedForm.saveButton.value);
 
-      // 11. Execute POST to /course/modedit.php
+      // Suppress course content notification to avoid student emails
+      formFields.delete('coursecontentnotification');
+
+      // 11. Execute POST to parsedForm.action
       let saveRes;
       try {
-        saveRes = await this.webSession.requestPage('/course/modedit.php', {
-          method: 'POST',
+        saveRes = await this.webSession.requestPage(parsedForm.action, {
+          method: parsedForm.method,
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: formFields.toString(),
         });
@@ -1419,13 +1880,14 @@ export class MoodleAssignmentManager {
         throw err;
       }
 
-      // Check A: session expired or login redirect
-      if (
-        saveRes.url.includes('/login/') ||
-        saveRes.url.includes('sistemas.ufsc.br') ||
-        /<form[^>]*id=["']fm1["']/i.test(saveRes.html) ||
-        /<form[^>]*id=["']login["']/i.test(saveRes.html)
-      ) {
+      const postDiag = extractStructuralMoodleDiagnostics(
+        saveRes.html,
+        saveRes.url,
+        saveRes.status
+      );
+
+      // Check A: session expired
+      if (postDiag.isLoginForm) {
         throw new MoodleAssignmentError(
           'session_expired',
           'A sessão autenticada do Moodle expirou durante a gravação da tarefa (redirecionado para tela de login).'
@@ -1433,44 +1895,41 @@ export class MoodleAssignmentManager {
       }
 
       // Check B: form rejected (re-rendered form with validation errors)
-      const isEditFormPresented =
-        /<input[^>]+name=["']_qf__mod_assign_mod_form["']/i.test(saveRes.html) ||
-        /<form[^>]+id=["']mform1["']/i.test(saveRes.html) ||
-        /<(?:div|span)[^>]*id=["']id_error_/i.test(saveRes.html);
-
-      if (isEditFormPresented) {
-        const formErrors = extractMoodleFormErrors(saveRes.html);
-        throw new MoodleAssignmentError(
-          'form_rejected',
-          `O formulário do Moodle rejeitou a gravação da tarefa: ${
-            formErrors.join('; ') || 'erro de validação nos campos do formulário modedit.php'
-          }.`,
-          { validationErrors: formErrors }
-        );
+      if (postDiag.isFormReRendered) {
+        const errText = postDiag.fieldErrors.length > 0
+          ? `O formulário do Moodle rejeitou a gravação da tarefa: ${postDiag.fieldErrors.join('; ')}.`
+          : `O formulário do Moodle foi re-exibido sem confirmar o salvamento (possível validação rejeitada ou CSRF inválido).`;
+        throw new MoodleAssignmentError('form_rejected', errText, {
+          validationErrors: postDiag.fieldErrors,
+          pageTitle: postDiag.pageTitle,
+        });
       }
 
       // Check C: fatal Moodle error page
-      if (
-        /<div[^>]*class=["'][^"']*errorbox[^"']*["']/i.test(saveRes.html) ||
-        (/sesskey/i.test(saveRes.html) && /invalid/i.test(saveRes.html))
-      ) {
-        const errs = extractMoodleFormErrors(saveRes.html);
+      if (postDiag.nativeError) {
         throw new MoodleAssignmentError(
           'moodle_api_error',
-          `Erro retornado pelo Moodle na gravação da tarefa: ${errs.join('; ') || 'erro fatal retornado pelo Moodle'}.`,
-          { errors: errs }
+          `Erro retornado pelo Moodle na gravação da tarefa: ${postDiag.nativeError}`,
+          {
+            error: postDiag.nativeError,
+            triggerMarker: postDiag.triggerMarker,
+            pageTitle: postDiag.pageTitle,
+          }
         );
       }
 
       // Check D: unconfirmed write (neither redirected to course view nor activity view)
-      const isConfirmedRedirect =
-        saveRes.url.includes('/course/view.php') ||
-        saveRes.url.includes('/mod/assign/view.php');
-
-      if (!isConfirmedRedirect) {
+      if (!postDiag.isConfirmedRedirect) {
+        const snippet = htmlToText(saveRes.html).slice(0, 200).replace(/\s+/g, ' ');
         throw new MoodleAssignmentError(
           'write_not_confirmed',
-          `A submissão do formulário retornou status HTTP ${saveRes.status} e URL inesperada (${saveRes.url}), não confirmando o salvamento da tarefa.`
+          `A submissão do formulário retornou status HTTP ${saveRes.status} e URL inesperada (${postDiag.sanitizedUrl}, título: "${postDiag.pageTitle}"), não confirmando o salvamento da tarefa.`,
+          {
+            httpStatus: saveRes.status,
+            finalUrl: postDiag.sanitizedUrl,
+            pageTitle: postDiag.pageTitle,
+            snippet,
+          }
         );
       }
 
@@ -1480,11 +1939,10 @@ export class MoodleAssignmentManager {
       const expectedPreserved: Record<string, any> = {};
       if (plan.unchangedFields) {
         for (const field of plan.unchangedFields) {
-          if (field === 'name') expectedPreserved.name = liveCurrent.name;
-          else if (field === 'maxGrade') expectedPreserved.maxGrade = liveCurrent.settings.maxGrade;
-          else if (field === 'teamSubmission') expectedPreserved.teamSubmission = liveCurrent.settings.teamSubmission;
-          else if (field === 'introAttachments') expectedPreserved.introAttachments = liveCurrent.intro.attachments;
-          else if (field === 'cutoffDate' && !plan.patch.cutoffDate) expectedPreserved.cutoffDate = liveCurrent.dates.cutoffDate;
+          const contractEntry = ASSIGNMENT_FIELD_CONTRACT[field];
+          if (contractEntry) {
+            expectedPreserved[field] = contractEntry.getValue(liveCurrent);
+          }
         }
       }
 
@@ -1546,6 +2004,20 @@ export class MoodleAssignmentManager {
       this.plansStore.delete(params.planId);
 
       return result;
+    } catch (err: any) {
+      // Record audit of failed operation
+      const errMsg = err?.message || String(err);
+      this.recordAudit({
+        timestamp: new Date().toISOString(),
+        operationId: params.operationId,
+        planId: params.planId,
+        planHash: params.planHash,
+        status: 'failed',
+        error: errMsg,
+        errorCode: err?.code || 'unknown_error',
+        details: err?.details,
+      });
+      throw err;
     } finally {
       if (params.operationId) {
         this.inFlightOperations.delete(params.operationId);
@@ -1585,196 +2057,21 @@ export class MoodleAssignmentManager {
 
       const checkPrefix = isPreserved ? `${key}Preserved` : `${key}Matches`;
 
-      switch (key) {
-        case 'name': {
-          const expName = String(expected ?? '').trim();
-          const actName = String(currentDetails.name ?? '').trim();
-          const matches = expName === actName;
-          checks[checkPrefix] = matches;
-          if (!matches) {
-            divergences.push(
-              `Nome (${actName}) diverge do esperado (${expName})`
-            );
-          }
-          break;
+      const contractEntry = ASSIGNMENT_FIELD_CONTRACT[key];
+      if (contractEntry) {
+        const actualVal = contractEntry.getValue(currentDetails);
+        const { matches, message } = contractEntry.compare(
+          actualVal,
+          expected,
+          this.defaultTimeZone
+        );
+        checks[checkPrefix] = matches;
+        if (!matches && message) {
+          divergences.push(message);
         }
-
-        case 'intro': {
-          const expNorm = String(expected || '').trim();
-          const actNorm = String(currentDetails.intro.html || '').trim();
-          const matches = expNorm === actNorm || expNorm === htmlToText(actNorm);
-          checks[checkPrefix] = matches;
-          if (!matches) {
-            divergences.push('Enunciado diverge do esperado');
-          }
-          break;
-        }
-
-        case 'visible': {
-          const expBool = Boolean(expected);
-          const actBool = currentDetails.visibility.moduleVisible;
-          const matches = actBool === expBool;
-          checks[checkPrefix] = matches;
-          if (!matches) {
-            divergences.push(
-              `Visibilidade (${actBool}) diverge do esperado (${expBool})`
-            );
-          }
-          break;
-        }
-
-        case 'alwaysShowDescription': {
-          const expBool = Boolean(expected);
-          const actBool = currentDetails.dates.alwaysShowDescription;
-          const matches = actBool === expBool;
-          checks[checkPrefix] = matches;
-          if (!matches) {
-            divergences.push(
-              `alwaysShowDescription (${actBool}) diverge do esperado (${expBool})`
-            );
-          }
-          break;
-        }
-
-        case 'dueDate':
-        case 'cutoffDate':
-        case 'allowSubmissionsFromDate':
-        case 'gradingDueDate': {
-          const normExp = normalizeExpectedDate(expected, this.defaultTimeZone);
-          const actDateObj = (currentDetails.dates as any)[key];
-          if (!actDateObj) {
-            checks[checkPrefix] = false;
-            divergences.push(`Campo de data "${key}" não encontrado nos detalhes da tarefa`);
-            break;
-          }
-
-          if (normExp.enabled) {
-            const expTs = normExp.timestamp;
-            const actTs = actDateObj.timestamp;
-            const actEnabled = actDateObj.enabled;
-            const matches = actEnabled && expTs !== undefined && actTs !== undefined
-              ? Math.abs(expTs - actTs) < 60
-              : false;
-            checks[checkPrefix] = matches;
-            if (!matches) {
-              divergences.push(
-                `${key} timestamp (${actTs}, enabled: ${actEnabled}) diverge do esperado (${expTs}, enabled: true)`
-              );
-            }
-          } else {
-            const matches = !actDateObj.enabled;
-            checks[checkPrefix] = matches;
-            if (!matches) {
-              divergences.push(`${key} deveria estar desabilitado mas permaneceu ativo (${actDateObj.timestamp})`);
-            }
-          }
-          break;
-        }
-
-        case 'fileSubmissionEnabled': {
-          const expBool = Boolean(expected);
-          const actBool = currentDetails.submissionConfig.fileSubmissionEnabled;
-          const matches = actBool === expBool;
-          checks[checkPrefix] = matches;
-          if (!matches) {
-            divergences.push(
-              `fileSubmissionEnabled (${actBool}) diverge do esperado (${expBool})`
-            );
-          }
-          break;
-        }
-
-        case 'maxFiles': {
-          const expNum = Number(expected);
-          const actNum = currentDetails.submissionConfig.maxFiles;
-          const matches = actNum === expNum;
-          checks[checkPrefix] = matches;
-          if (!matches) {
-            divergences.push(`maxFiles (${actNum}) diverge de ${expNum}`);
-          }
-          break;
-        }
-
-        case 'fileTypes': {
-          const expNorm = String(expected || '').toLowerCase().replace(/\s+/g, '');
-          const actNorm = String(currentDetails.submissionConfig.fileTypes || '').toLowerCase().replace(/\s+/g, '');
-          const matches = expNorm === actNorm;
-          checks[checkPrefix] = matches;
-          if (!matches) {
-            divergences.push(`fileTypes ("${actNorm}") diverge de "${expNorm}"`);
-          }
-          break;
-        }
-
-        case 'maxSizeBytes': {
-          const expNum = Number(expected);
-          const actNum = currentDetails.submissionConfig.maxSizeBytes;
-          const matches = actNum === expNum;
-          checks[checkPrefix] = matches;
-          if (!matches) {
-            divergences.push(`maxSizeBytes (${actNum}) diverge de ${expNum}`);
-          }
-          break;
-        }
-
-        case 'maxGrade':
-        case 'grade': {
-          const expNum = Number(expected);
-          const actNum = Number(currentDetails.settings.maxGrade);
-          const matches = actNum === expNum;
-          checks[checkPrefix] = matches;
-          if (!matches) {
-            divergences.push(`maxGrade (${actNum}) diverge de ${expNum}`);
-          }
-          break;
-        }
-
-        case 'teamSubmission':
-        case 'isTeamSubmission': {
-          const expBool = Boolean(expected);
-          const actBool = currentDetails.settings.teamSubmission;
-          const matches = actBool === expBool;
-          checks[checkPrefix] = matches;
-          if (!matches) {
-            divergences.push(`teamSubmission (${actBool}) diverge de ${expBool}`);
-          }
-          break;
-        }
-
-        case 'introAttachments':
-        case 'attachments': {
-          const actAttachments = currentDetails.intro.attachments || [];
-          let matches = false;
-          if (Array.isArray(expected)) {
-            matches = actAttachments.length === expected.length;
-          } else if (typeof expected === 'number') {
-            matches = actAttachments.length === expected;
-          } else {
-            matches = (actAttachments.length > 0) === Boolean(expected);
-          }
-          checks[checkPrefix] = matches;
-          if (!matches) {
-            divergences.push(
-              `introAttachments (${actAttachments.length} arquivos) diverge do esperado (${JSON.stringify(expected)})`
-            );
-          }
-          break;
-        }
-
-        default: {
-          if (key in currentDetails) {
-            const actVal = (currentDetails as any)[key];
-            const matches = actVal == expected;
-            checks[checkPrefix] = matches;
-            if (!matches) {
-              divergences.push(`Campo "${key}" (${actVal}) diverge do esperado (${expected})`);
-            }
-          } else {
-            checks[checkPrefix] = false;
-            divergences.push(`Chave de expectativa desconhecida ou não suportada para verificação: "${key}"`);
-          }
-          break;
-        }
+      } else {
+        checks[checkPrefix] = false;
+        divergences.push(`Chave de expectativa desconhecida ou não suportada para verificação: "${key}"`);
       }
     };
 

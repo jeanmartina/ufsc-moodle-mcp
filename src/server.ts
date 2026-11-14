@@ -41,7 +41,9 @@ import {
 } from './assignment-manager.js';
 import { withOperationMetrics } from './request-context.js';
 
-export const SERVER_VERSION = '1.4.1';
+export const SERVER_VERSION = '1.4.2';
+export const BUILD_COMMIT = '04f8313';
+export const BUILD_TIME = '2026-11-14T03:55:00Z';
 export const MCP_PROTOCOL_VERSION = '2025-03-26';
 
 export const REGISTERED_TOOL_NAMES = [
@@ -201,7 +203,7 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
       name: 'ufsc-moodle-mcp',
       title: 'UFSC Moodle MCP Server',
       description:
-        'Integração segura v1.4.1 para o Moodle da UFSC: consulta completa e segura de tarefas mod_assign (get_assignment_details), fluxo auditado em duas etapas de preparação e alteração (prepare_assignment_update / commit_assignment_update) com verificação pós-escrita (verify_assignment_update) para enunciado, prazos independentes (dueDate vs cutoffDate), visibilidade e arquivos de entrega (.pdf, .zip), resolução determinística de grupos de projeto, OCR local com layout estruturado, download binário preservado e atualização verificada de arquivos didáticos mod_resource.',
+        'Integração segura v1.4.2 para o Moodle da UFSC: consulta completa e segura de tarefas mod_assign (get_assignment_details), fluxo auditado em duas etapas de preparação e alteração (prepare_assignment_update / commit_assignment_update) com verificação pós-escrita (verify_assignment_update) para enunciado, prazos independentes (dueDate vs cutoffDate), visibilidade e arquivos de entrega (.pdf, .zip), resolução determinística de grupos de projeto, OCR local com layout estruturado, download binário preservado e atualização verificada de arquivos didáticos mod_resource.',
       version: SERVER_VERSION,
     },
     {
@@ -210,7 +212,7 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
         resources: { listChanged: true },
       },
       instructions:
-        'Use get_moodle_capabilities para inspecionar ferramentas expostas, limites, OCR e capacidades do servidor v1.4.1. ' +
+        'Use get_moodle_capabilities para inspecionar ferramentas expostas, limites, OCR e capacidades do servidor v1.4.2. ' +
         'Para gerenciar tarefas (mod_assign): (1) Chame get_assignment_details(courseId, assignmentId) para leitura completa (enunciado, status do enunciado, datas com timezone, visibilidade de módulo e seção e limites de arquivos de entrega); ' +
         '(2) Prepare a alteração com prepare_assignment_update (gera diff legível, hash criptográfico e validações sem escrever no Moodle); ' +
         '(3) Aplique o plano aprovado com commit_assignment_update (exige planId, planHash e confirmedByReviewer=true; detecta concorrência e grava via controlador oficial); ' +
@@ -2984,6 +2986,8 @@ export function createServer(config?: MoodleConfig, sharedClient?: MoodleClient)
           return {
             serverName: 'ufsc-moodle-mcp',
             serverVersion: SERVER_VERSION,
+            buildCommit: BUILD_COMMIT,
+            buildTime: BUILD_TIME,
             mcpProtocolVersion: MCP_PROTOCOL_VERSION,
             siteUrl: cfg.siteUrl,
             ...(moodleSite ? { moodleSite } : {}),

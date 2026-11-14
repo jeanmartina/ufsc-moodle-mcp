@@ -1,6 +1,6 @@
 {
   "name": "ufsc-moodle-mcp",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "MCP server para o Moodle da UFSC (presencial.moodle.ufsc.br) — gerenciamento de disciplinas, grupos e mod_groupselect, mensagens, fóruns, entregas individuais e em grupo, download binário preservado para OCR/renderização, extração de texto e avaliação",
   "license": "MIT",
   "author": "Jean Everson Martina",

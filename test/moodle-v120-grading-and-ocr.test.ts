@@ -1112,7 +1112,7 @@ describe('UFSC Moodle MCP v1.2.0 — Grupos Definitivos, Avaliações em Lote, P
     expect(capRes.isError).toBeFalsy();
     const caps = parseToolJson(capRes);
 
-    expect(caps.serverVersion).toBe('1.4.1');
+    expect(caps.serverVersion).toBe('1.4.2');
     expect(caps.availableToolsCount).toBe(34);
     expect(caps.moodleSite.connected).toBe(true);
     expect(caps.moodleSite.release).toContain('4.1.5+');

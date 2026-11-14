@@ -52,6 +52,8 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
   let mockSimulateSessionExpired = false;
   let mockSimulateUnconfirmedWrite = false;
   let mockSimulateDivergenceOnSave = false;
+  let mockSimulateNativeMoodleError = false;
+  let mockSimulateUnclassifiedResponse = false;
 
   beforeAll(async () => {
     serverTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'moodle-assignment-test-'));
@@ -269,7 +271,13 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
             <html>
             <head><title>Edit Assignment</title></head>
             <body>
-              <form method="post" action="/course/modedit.php" id="mform1" class="mform" name="_qf__mod_assign_mod_form">
+              <!-- Other form on the page that must NOT be serialized into modedit POST -->
+              <form class="nav-search-form" action="/search" method="get">
+                <input type="text" name="query" value="search text to ignore" />
+                <select name="nav_jump"><option value="jump_1">Jump 1</option></select>
+              </form>
+
+              <form method="post" action="/course/modedit.php" id="mform1_YePVq1EVMN6ga7f" class="mform" name="_qf__mod_assign_mod_form">
                 <input type="hidden" name="sesskey" value="MOCK_SESSKEY_12345" />
                 <input type="hidden" name="_qf__mod_assign_mod_form" value="1" />
                 <input type="hidden" name="update" value="1569058" />
@@ -282,10 +290,18 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
                 <input type="hidden" name="introeditor[format]" value="${currentIntroFormat}" />
                 <input type="hidden" name="introeditor[itemid]" value="789012" />
 
-                <input type="hidden" name="alwaysshowdescription" value="0" />
-                <input type="checkbox" name="alwaysshowdescription" value="1" ${currentAlwaysShowDescription ? 'checked' : ''} />
+                <!-- Checkbox with hidden companion default -->
                 <input type="hidden" name="showdescription" value="0" />
-                <input type="checkbox" name="showdescription" value="1" ${currentAlwaysShowDescription ? 'checked' : ''} />
+                <input type="checkbox" name="showdescription" value="1" id="id_showdescription" />
+
+                <!-- alwaysshowdescription checkbox (distinct from showdescription) -->
+                <input type="checkbox" name="alwaysshowdescription" value="1" id="id_alwaysshowdescription" ${currentAlwaysShowDescription ? 'checked' : ''} />
+
+                <!-- Disabled control that must be ignored by form submission -->
+                <input type="text" name="disabled_control" value="should_be_skipped" disabled />
+
+                <!-- Entity test -->
+                <input type="hidden" name="entity_test" value="Texto &amp; &quot;aspas&quot; &#039;teste&#039;" />
 
                 <input type="checkbox" name="duedate[enabled]" value="1" ${currentDueDate > 0 ? 'checked' : ''} />
                 <select name="duedate[day]"><option value="1">1</option><option value="26" selected >26</option></select>
@@ -303,8 +319,8 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
 
                 <input type="checkbox" name="assignsubmission_file_enabled" value="1" ${currentFileSubmissionEnabled ? 'checked' : ''} />
                 <select name="assignsubmission_file_maxfiles"><option value="1">1</option><option value="2" selected >2</option></select>
-                <input type="text" name="assignsubmission_file_filetypes[filetypes]" value="${currentFileTypes}" />
-                <input type="text" name="assignsubmission_file_filetypes" value="${currentFileTypes}" />
+                <!-- Exact real Moodle 4.x input name for file types without scalar duplicate -->
+                <input type="text" name="assignsubmission_file_filetypes[filetypes]" id="id_assignsubmission_file_filetypes" value="${currentFileTypes}" />
                 <input type="text" name="assignsubmission_file_maxsizebytes" value="${currentMaxSizeBytes}" />
 
                 <select name="grade[modgrade_type]"><option value="none">Nenhum</option><option value="point" selected >Ponto</option></select>
@@ -342,6 +358,46 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
             return;
           }
 
+          if (mockSimulateNativeMoodleError) {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(`
+              <!DOCTYPE html><html><head><title>Erro no Moodle</title></head><body>
+                <div class="alert alert-danger" role="alert">Erro nativo do banco de dados Moodle: dmlwriteexception ao gravar tabela assign.</div>
+              </body></html>
+            `);
+            return;
+          }
+
+          if (mockSimulateUnclassifiedResponse) {
+            res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(`<!DOCTYPE html><html><head><title>502 Bad Gateway</title></head><body><h1>Bad Gateway</h1><p>The proxy could not connect to upstream server.</p></body></html>`);
+            return;
+          }
+
+          // Strict validation: Reject if scalar assignsubmission_file_filetypes was sent!
+          if (params.has('assignsubmission_file_filetypes')) {
+            res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(`
+              <!DOCTYPE html><html><body>
+                <div class="alert alert-danger">PHP Fatal Error: Scalar assignsubmission_file_filetypes collision detected</div>
+              </body></html>
+            `);
+            return;
+          }
+
+          // Strict validation: Reject if disabled control or control from other form was sent!
+          if (params.has('disabled_control')) {
+            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end('<div class="alert alert-danger">Disabled control was improperly submitted</div>');
+            return;
+          }
+
+          if (params.has('query')) {
+            res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end('<div class="alert alert-danger">Extraneous control from other form submitted</div>');
+            return;
+          }
+
           if (mockSimulateFormRejection) {
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
             res.end(`
@@ -357,7 +413,7 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
 
           if (mockSimulateUnconfirmedWrite) {
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end('<!DOCTYPE html><html><body>Página inesperada sem confirmação</body></html>');
+            res.end('<!DOCTYPE html><html><head><title>Página Inesperada</title></head><body>Página inesperada sem confirmação</body></html>');
             return;
           }
 
@@ -401,7 +457,6 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
             currentAssignmentIntro = params.get('introeditor[text]');
           }
           if (mockSimulateDivergenceOnSave) {
-            // Divergence: simulate save reported OK to Moodle web session, but live state was reverted/not persisted
             currentModuleVisible = false;
           } else if (params.has('visible')) {
             currentModuleVisible = params.get('visible') === '1';
@@ -442,8 +497,6 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
           }
           if (params.has('assignsubmission_file_filetypes[filetypes]')) {
             currentFileTypes = params.get('assignsubmission_file_filetypes[filetypes]') || '';
-          } else if (params.has('assignsubmission_file_filetypes')) {
-            currentFileTypes = params.get('assignsubmission_file_filetypes') || '';
           }
           if (params.has('assignsubmission_file_maxsizebytes')) {
             currentMaxSizeBytes = parseInt(params.get('assignsubmission_file_maxsizebytes') || '0', 10);
@@ -453,6 +506,26 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
           res.writeHead(303, { Location: `${mockMoodleBaseUrl}/course/view.php?id=49472` });
           res.end();
         });
+        return;
+      }
+
+      // Course view endpoint: returns realistic course page with sesskey, invalid-feedback classes and "invalidjson"
+      if (url.pathname === '/course/view.php') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(`
+          <!DOCTYPE html>
+          <html>
+          <head><title>INE5429-07208: Segurança em Sistemas</title></head>
+          <body>
+            <h1>Página da Disciplina</h1>
+            <script>
+              M.cfg = { "wwwroot": "${mockMoodleBaseUrl}", "sesskey": "MOCK_SESSKEY_12345" };
+              var strTable = { "invalidjson": "palavra JSON inválida", "size": "Tamanho" };
+            </script>
+            <div class="form-control-feedback invalid-feedback" id="id_error_sample"></div>
+          </body>
+          </html>
+        `);
         return;
       }
 
@@ -1344,5 +1417,300 @@ describe('UFSC Moodle MCP v1.4.0 — Gestão e Publicação de Tarefas (mod_assi
     expect(auditContent).not.toContain('ProfPassword123');
     expect(auditContent).not.toContain('MOCK_SESSKEY_12345');
     expect(auditContent).not.toContain('mock_valid_session_assign_123');
+  });
+
+  // Test 22: Página válida contendo sesskey e invalid em scripts não dispara erro fatal, salva e confirma com sucesso
+  it('22. Resposta de salvamento contendo sesskey e invalid em scripts não dispara erro fatal falso positivo', async () => {
+    currentModuleVisible = false;
+    const prepRes = await mcpClient.callTool({
+      name: 'prepare_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        patch: {
+          visible: true,
+        },
+      },
+    });
+    const plan = parseToolJson(prepRes);
+
+    const commitRes = await mcpClient.callTool({
+      name: 'commit_assignment_update',
+      arguments: {
+        planId: plan.planId,
+        planHash: plan.planHash,
+        confirmedByReviewer: true,
+      },
+    });
+
+    expect(commitRes.isError).toBeFalsy();
+    const commitData = parseToolJson(commitRes);
+    expect(commitData.success).toBe(true);
+    expect(commitData.status).toBe('committed_and_verified');
+    expect(commitData.verification.verified).toBe(true);
+    expect(commitData.errorMessage).toBeUndefined();
+  });
+
+  // Test 23: Página de erro real do Moodle (.alert-danger, #notice, errorbox) retorna mensagem nativa sem inventar texto
+  it('23. Erro nativo real do Moodle retorna mensagem sanitizada sem texto inventado', async () => {
+    currentModuleVisible = false;
+    const prepRes = await mcpClient.callTool({
+      name: 'prepare_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        patch: {
+          visible: true,
+        },
+      },
+    });
+    const plan = parseToolJson(prepRes);
+
+    mockSimulateNativeMoodleError = true;
+    try {
+      const commitRes = await mcpClient.callTool({
+        name: 'commit_assignment_update',
+        arguments: {
+          planId: plan.planId,
+          planHash: plan.planHash,
+          confirmedByReviewer: true,
+        },
+      });
+
+      expect(commitRes.isError).toBe(true);
+      const commitData = parseToolJson(commitRes);
+      expect(commitData.errorCode).toBe('moodle_api_error');
+      expect(commitData.errorMessage).toContain('Erro nativo do banco de dados Moodle: dmlwriteexception ao gravar tabela assign.');
+      expect(commitData.errorMessage).not.toContain('erro fatal retornado pelo Moodle');
+    } finally {
+      mockSimulateNativeMoodleError = false;
+    }
+  });
+
+  // Test 24: Resposta não-classificada (HTTP 502) reporta write_not_confirmed preservando status, URL, título e trecho
+  it('24. Resposta não-classificada (HTTP 502) reporta write_not_confirmed com título e status sem inventar erro fatal', async () => {
+    currentModuleVisible = false;
+    const prepRes = await mcpClient.callTool({
+      name: 'prepare_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        patch: {
+          visible: true,
+        },
+      },
+    });
+    const plan = parseToolJson(prepRes);
+
+    mockSimulateUnclassifiedResponse = true;
+    try {
+      const commitRes = await mcpClient.callTool({
+        name: 'commit_assignment_update',
+        arguments: {
+          planId: plan.planId,
+          planHash: plan.planHash,
+          confirmedByReviewer: true,
+        },
+      });
+
+      expect(commitRes.isError).toBe(true);
+      const commitData = parseToolJson(commitRes);
+      expect(commitData.errorCode).toBe('write_not_confirmed');
+      expect(commitData.errorMessage).toContain('502');
+      expect(commitData.errorMessage).toContain('502 Bad Gateway');
+      expect(commitData.errorMessage).not.toContain('erro fatal retornado pelo Moodle');
+    } finally {
+      mockSimulateUnclassifiedResponse = false;
+    }
+  });
+
+  // Test 25: Escopo do formulário ignora formulários externos, preserva entidades, ignora controles desabilitados e lida com checkboxes
+  it('25. Escopo do formulário modedit isola _qf__mod_assign_mod_form, decodifica entidades e ignora controles desabilitados', async () => {
+    currentModuleVisible = false;
+    const prepRes = await mcpClient.callTool({
+      name: 'prepare_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        patch: {
+          visible: true,
+        },
+      },
+    });
+    const plan = parseToolJson(prepRes);
+
+    const commitRes = await mcpClient.callTool({
+      name: 'commit_assignment_update',
+      arguments: {
+        planId: plan.planId,
+        planHash: plan.planHash,
+        confirmedByReviewer: true,
+      },
+    });
+
+    expect(commitRes.isError).toBeFalsy();
+    const params = new URLSearchParams(lastModeditPostBody);
+    // Outer search form inputs must NOT be submitted
+    expect(params.has('query')).toBe(false);
+    expect(params.has('nav_jump')).toBe(false);
+    // Disabled control must NOT be submitted
+    expect(params.has('disabled_control')).toBe(false);
+    // Entity decoded properly in preserved form inputs
+    expect(params.get('entity_test')).toBe('Texto & "aspas" \'teste\'');
+    // submitbutton2 was submitted
+    expect(params.get('submitbutton2')).toBe('Salvar e voltar ao curso');
+    // cancel was NOT submitted
+    expect(params.has('cancel')).toBe(false);
+  });
+
+  // Test 26: Parâmetro filetypes estrito sem colisão escalar aceita PDF e ZIP
+  it('26. Parâmetro assignsubmission_file_filetypes[filetypes] não sofre colisão escalar com chave raiz', async () => {
+    currentFileTypes = '';
+    const prepRes = await mcpClient.callTool({
+      name: 'prepare_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        patch: {
+          fileTypes: '.pdf,.zip',
+        },
+      },
+    });
+    const plan = parseToolJson(prepRes);
+
+    const commitRes = await mcpClient.callTool({
+      name: 'commit_assignment_update',
+      arguments: {
+        planId: plan.planId,
+        planHash: plan.planHash,
+        confirmedByReviewer: true,
+      },
+    });
+
+    expect(commitRes.isError).toBeFalsy();
+    const commitData = parseToolJson(commitRes);
+    expect(commitData.success).toBe(true);
+
+    const params = new URLSearchParams(lastModeditPostBody);
+    expect(params.get('assignsubmission_file_filetypes[filetypes]')).toBe('.pdf,.zip');
+    expect(params.has('assignsubmission_file_filetypes')).toBe(false);
+  });
+
+  // Test 27: Independência entre alwaysshowdescription/showdescription e dueDate/cutoffDate
+  it('27. Independência entre alwaysshowdescription/showdescription e dueDate/cutoffDate', async () => {
+    currentAlwaysShowDescription = 0;
+    currentDueDate = 1795748340; // 26/11/2026 23:59:00
+    currentCutoffDate = 0;
+
+    const prepRes = await mcpClient.callTool({
+      name: 'prepare_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        patch: {
+          alwaysShowDescription: true,
+          cutoffDate: {
+            enabled: true,
+            date: '2026-11-30T23:59:00-03:00',
+          },
+        },
+      },
+    });
+    const plan = parseToolJson(prepRes);
+
+    const commitRes = await mcpClient.callTool({
+      name: 'commit_assignment_update',
+      arguments: {
+        planId: plan.planId,
+        planHash: plan.planHash,
+        confirmedByReviewer: true,
+      },
+    });
+
+    expect(commitRes.isError).toBeFalsy();
+    const params = new URLSearchParams(lastModeditPostBody);
+    // alwaysshowdescription is set to 1
+    expect(params.get('alwaysshowdescription')).toBe('1');
+    // showdescription remains 0 (course overview description display not confused with assignment alwaysshowdescription)
+    expect(params.get('showdescription')).toBe('0');
+    // duedate was preserved
+    expect(params.get('duedate[year]')).toBe('2026');
+    // cutoffdate was updated
+    expect(params.get('cutoffdate[enabled]')).toBe('1');
+    expect(params.get('cutoffdate[day]')).toBe('30');
+  });
+
+  // Test 28: Preservação e verificação unificada de onlineTextEnabled, commentsEnabled e introAttachments
+  it('28. Preservação e verificação unificada de onlineTextEnabled, commentsEnabled e introAttachments', async () => {
+    currentModuleVisible = false;
+    const prepRes = await mcpClient.callTool({
+      name: 'prepare_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        patch: {
+          visible: true,
+        },
+      },
+    });
+    const plan = parseToolJson(prepRes);
+
+    // Verify contract keys in plan.unchangedFields array
+    expect(plan.unchangedFields).toContain('onlineTextEnabled');
+    expect(plan.unchangedFields).toContain('commentsEnabled');
+    expect(plan.unchangedFields).toContain('introAttachments');
+
+    const commitRes = await mcpClient.callTool({
+      name: 'commit_assignment_update',
+      arguments: {
+        planId: plan.planId,
+        planHash: plan.planHash,
+        confirmedByReviewer: true,
+      },
+    });
+
+    expect(commitRes.isError).toBeFalsy();
+    const commitData = parseToolJson(commitRes);
+    expect(commitData.verification.verified).toBe(true);
+    expect(commitData.verification.checks.onlineTextEnabledPreserved).toBe(true);
+    expect(commitData.verification.checks.commentsEnabledPreserved).toBe(true);
+    expect(commitData.verification.checks.introAttachmentsPreserved).toBe(true);
+
+    // Independent verify_assignment_update with introAttachments checks
+    const verifyRes = await mcpClient.callTool({
+      name: 'verify_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        expectedChanges: {
+          visible: true,
+          introAttachments: [
+            { filename: 'roteiro_devsecops_anexo.pdf', filesize: 124500 },
+          ],
+        },
+      },
+    });
+    expect(verifyRes.isError).toBeFalsy();
+    const verifyData = parseToolJson(verifyRes);
+    expect(verifyData.verified).toBe(true);
+
+    // Verify divergence detection on introAttachments
+    const verifyDivergentRes = await mcpClient.callTool({
+      name: 'verify_assignment_update',
+      arguments: {
+        courseId: 49472,
+        assignmentId: 125468,
+        expectedChanges: {
+          introAttachments: [
+            { filename: 'arquivo_inexistente.pdf', filesize: 99999 },
+          ],
+        },
+      },
+    });
+    expect(verifyDivergentRes.isError).toBeFalsy();
+    const divData = parseToolJson(verifyDivergentRes);
+    expect(divData.verified).toBe(false);
+    expect(divData.status).toBe('divergence');
+    expect(divData.divergences?.[0]).toContain('anexo esperado "arquivo_inexistente.pdf" não encontrado');
   });
 });
